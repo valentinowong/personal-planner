@@ -1,33 +1,9 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  useCallback,
-  useRef,
-  type MutableRefObject,
-} from "react";
-import {
-  ActivityIndicator,
-  Alert,
-  Modal,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  TextInput,
-  useWindowDimensions,
-  View,
-} from "react-native";
-import type { ViewToken } from "react-native";
-import { FlashList } from "@shopify/flash-list";
-import type { FlashList as FlashListType } from "@shopify/flash-list";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Alert, Pressable, SafeAreaView, StyleSheet, useWindowDimensions, View } from "react-native";
 import { useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Ionicons, Feather } from "@expo/vector-icons";
+import { Feather } from "@expo/vector-icons";
+import type { FlashList as FlashListType } from "@shopify/flash-list";
 import { useLists } from "../../src/hooks/useLists";
 import type { RemoteList } from "../../src/hooks/useLists";
 import {
@@ -43,35 +19,23 @@ import { useAuth } from "../../src/contexts/AuthContext";
 import type { LocalTask } from "../../src/lib/db";
 import { queueTaskMutation } from "../../src/lib/sync";
 import { generateUUID } from "../../src/lib/uuid";
-import { AddTaskInput } from "../../src/components/AddTaskInput";
-import { ListTaskItem } from "../../src/components/ListTaskItem";
-import { SegmentedControl } from "../../src/components/SegmentedControl";
-import { TaskCard } from "../../src/components/TaskCard";
-import { TaskDetailView } from "../../src/components/TaskDetailView";
 import { useTheme } from "../../src/contexts/ThemeContext";
 import type { ThemeColors } from "../../src/theme";
 import { deleteList as deleteListRow } from "../../src/services/api/lists";
-
-type ViewMode = "calendar" | "tasks";
-type DeleteAction = "delete" | "move_inbox" | "move_other";
-
-type PlannerDay = {
-  key: string;
-  weekday: string;
-  monthText: string;
-  dayNumber: string;
-  dateObj: Date;
-};
-
-const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
-const DAY_COLUMN_WIDTH = 260;
-const HOUR_BLOCK_HEIGHT = 64;
-
-function formatHourLabel(hour: number) {
-  const suffix = hour >= 12 ? "PM" : "AM";
-  const normalized = hour % 12 === 0 ? 12 : hour % 12;
-  return `${normalized} ${suffix}`;
-}
+import type { DeleteAction, PlannerDay, PlannerViewMode } from "../../src/components/planner/types";
+import { PlannerStylesContext } from "../../src/components/planner/PlannerStylesContext";
+import { PlannerBacklogPanel } from "../../src/components/planner/PlannerBacklogPanel";
+import { PlannerHero } from "../../src/components/planner/PlannerHero";
+import { PlannerTaskBoard } from "../../src/components/planner/PlannerTaskBoard";
+import { PlannerWeekCalendarGrid } from "../../src/components/planner/PlannerWeekCalendarGrid";
+import { PlannerDailySchedulePanel, PlannerDailyTaskPanel } from "../../src/components/planner/PlannerDailyPanels";
+import {
+  PlannerAppSettingsModal,
+  PlannerCreateListModal,
+  PlannerDeleteListModal,
+  PlannerTaskDetailModal,
+} from "../../src/components/planner/PlannerModals";
+import { DAY_COLUMN_WIDTH, HOUR_BLOCK_HEIGHT } from "../../src/components/planner/time";
 
 function formatDateKey(date: Date) {
   return date.toISOString().split("T")[0];
@@ -116,35 +80,6 @@ function buildPlannerDayRange(startOffset: number, endOffset: number): PlannerDa
   });
 }
 
-function getTaskTimeMetrics(task: LocalTask) {
-  if (!task.planned_start) return null;
-  const startDate = new Date(task.planned_start);
-  if (Number.isNaN(startDate.getTime())) return null;
-  const endDate = task.planned_end ? new Date(task.planned_end) : new Date(startDate.getTime() + 60 * 60 * 1000);
-  if (Number.isNaN(endDate.getTime())) return null;
-  let startMinutes = startDate.getHours() * 60 + startDate.getMinutes();
-  let endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
-  if (endMinutes <= startMinutes) {
-    endMinutes = startMinutes + 60;
-  }
-  startMinutes = Math.max(0, Math.min(24 * 60, startMinutes));
-  endMinutes = Math.max(startMinutes + 15, Math.min(24 * 60, endMinutes));
-  return {
-    startMinutes,
-    durationMinutes: endMinutes - startMinutes,
-  };
-}
-
-type PlannerStyles = ReturnType<typeof createStyles>;
-const PlannerStylesContext = createContext<PlannerStyles | null>(null);
-
-function usePlannerStyles() {
-  const value = useContext(PlannerStylesContext);
-  if (!value) {
-    throw new Error("Planner styles missing");
-  }
-  return value;
-}
 
 function rowToLocalTask(row: TaskWindowRow): LocalTask {
   return {
@@ -180,7 +115,7 @@ export default function ListsScreen() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newListName, setNewListName] = useState("");
   const [creatingList, setCreatingList] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("tasks");
+  const [viewMode, setViewMode] = useState<PlannerViewMode>("tasks");
   const [plannerOffset, setPlannerOffset] = useState(0);
   const plannerDays = useMemo(() => buildPlannerDays(plannerOffset, daysPerView), [plannerOffset, daysPerView]);
   const calendarRangeLabel = useMemo(
@@ -297,8 +232,6 @@ export default function ListsScreen() {
     });
     return bucket;
   }, [orderedLists, backlogQuery.data]);
-
-  const activeBacklogTasks = activeListId ? backlogByList[activeListId] ?? [] : [];
 
   const scheduledByDay = useMemo(() => {
     const bucket: Record<string, LocalTask[]> = {};
@@ -581,15 +514,6 @@ export default function ListsScreen() {
     setTaskDetailId(task.id);
   }
 
-  function handleBacklogInput(title: string) {
-    const targetListId = activeListId ?? inboxList?.id;
-    if (!targetListId) {
-      Alert.alert("Create a list first", "Add Inbox or another list to capture tasks.");
-      return;
-    }
-    return handleAddBacklogTask(targetListId, title);
-  }
-
   if (listsLoading && !orderedLists.length) {
     return (
       <SafeAreaView style={styles.loadingScreen}>
@@ -601,1048 +525,148 @@ export default function ListsScreen() {
   return (
     <PlannerStylesContext.Provider value={styles}>
       <SafeAreaView style={styles.safe}>
-      <View style={[styles.shell, isDesktop ? styles.shellRow : styles.shellColumn]}>
+        <View style={[styles.shell, isDesktop ? styles.shellRow : styles.shellColumn]}>
         {showBacklog ? (
-        <BacklogPanel
+        <PlannerBacklogPanel
           lists={orderedLists}
           activeListId={activeListId}
           onSelectList={(id) => setActiveListId(id)}
-          tasks={activeBacklogTasks}
+          tasksByList={backlogByList}
           isLoading={backlogQuery.isLoading}
-          onAddTask={handleBacklogInput}
+          onAddTask={handleAddBacklogTask}
           onToggleTask={handleToggleBacklogTask}
           onBeginSchedule={handleBeginSchedule}
           onCreateList={() => setCreateModalOpen(true)}
-          onOpenTask={handleOpenTaskDetail}
-          onDeleteList={handleRequestDeleteList}
-          undeletableListId={inboxList?.id ?? null}
-        />
-        ) : null}
-        <View style={styles.centerPane}>
-        <View style={styles.heroShell}>
-          <Pressable
-            style={[styles.railToggle, !showBacklog && styles.railToggleInactive]}
-            onPress={() => setShowBacklog((prev) => !prev)}
-            accessibilityLabel="Show or hide backlog rail"
-          >
-            <Feather name="sidebar" size={18} color={colors.text} />
-          </Pressable>
-          <View style={styles.heroGrow}>
-            <PlannerHero
-              viewMode={viewMode}
-              onChangeViewMode={setViewMode}
-              rangeLabel={heroRangeLabel}
-              onPrev={() => handleShiftWeek(-1)}
-              onNext={() => handleShiftWeek(1)}
-              onToday={handleResetToToday}
-              onOpenSettings={() => setSettingsModalOpen(true)}
+              onOpenTask={handleOpenTaskDetail}
+              onDeleteList={handleRequestDeleteList}
+              undeletableListId={inboxList?.id ?? null}
             />
-          </View>
-          <Pressable
-            style={[styles.railToggle, !showTimebox && styles.railToggleInactive]}
-            onPress={() => setShowTimebox((prev) => !prev)}
-            accessibilityLabel="Show or hide timebox rail"
-          >
-            <View style={styles.railToggleRightIcon}>
-              <Feather name="sidebar" size={18} color={colors.text} />
+          ) : null}
+          <View style={styles.centerPane}>
+            <View style={styles.heroShell}>
+              <Pressable
+                style={[styles.railToggle, !showBacklog && styles.railToggleInactive]}
+                onPress={() => setShowBacklog((prev) => !prev)}
+                accessibilityLabel="Show or hide backlog rail"
+              >
+                <Feather name="sidebar" size={18} color={colors.text} />
+              </Pressable>
+              <View style={styles.heroGrow}>
+                <PlannerHero
+                  viewMode={viewMode}
+                  onChangeViewMode={setViewMode}
+                  rangeLabel={heroRangeLabel}
+                  onPrev={() => handleShiftWeek(-1)}
+                  onNext={() => handleShiftWeek(1)}
+                  onToday={handleResetToToday}
+                  onOpenSettings={() => setSettingsModalOpen(true)}
+                />
+              </View>
+              <Pressable
+                style={[styles.railToggle, !showTimebox && styles.railToggleInactive]}
+                onPress={() => setShowTimebox((prev) => !prev)}
+                accessibilityLabel="Show or hide timebox rail"
+              >
+                <View style={styles.railToggleRightIcon}>
+                  <Feather name="sidebar" size={18} color={colors.text} />
+                </View>
+              </Pressable>
             </View>
-          </Pressable>
-        </View>
-        {viewMode === "calendar" ? (
-          <WeekCalendarGrid
-            days={plannerDays}
-            tasksByDay={scheduledByDay}
-            pendingTask={pendingTask}
-            onDropPendingIntoDay={handleDropPendingIntoDay}
-            onDropPendingIntoSlot={handleDropPendingIntoSlot}
-            onOpenTask={handleOpenTaskDetail}
-            onToggleTask={handleToggleScheduledTask}
-            onSelectDay={(dayKey) => setSelectedDayKey(dayKey)}
-            selectedDayKey={resolvedSelectedDayKey}
-            gridHeight={calendarGridHeight}
-          />
-        ) : (
-          <TaskPlannerBoard
-            days={taskDays}
-            tasksByDay={scheduledByDay}
-            pendingTask={pendingTask}
-            onDropPending={handleDropPendingIntoDay}
-            onAddTask={handleAddScheduledTask}
-            onToggleTask={handleToggleScheduledTask}
-            onOpenTask={handleOpenTaskDetail}
-            onSelectDay={(dayKey) => setSelectedDayKey(dayKey)}
-            selectedDayKey={resolvedSelectedDayKey}
-            onReachPast={() => extendTaskDays("past")}
-            onReachFuture={() => extendTaskDays("future")}
-            listRef={taskBoardRef}
-            onVisibleRangeChange={handleTaskBoardVisibleRangeChange}
-          />
-        )}
-        </View>
-        {showTimebox && (viewMode === "calendar" ? selectedDay : railDay) ? (
-          viewMode === "calendar" ? (
-            <DailyTaskPanel
-              day={selectedDay}
-              tasks={selectedDayTasks}
-              onAddTask={(title) => handleAddScheduledTask(selectedDay.key, title)}
-              onToggleTask={handleToggleScheduledTask}
-              onOpenTask={handleOpenTaskDetail}
-              onStepDay={stepSelectedDay}
-              onToday={handleResetToToday}
-              disablePrev={!selectedCanPrev}
-              disableNext={!selectedCanNext}
-            />
-          ) : (
-            <DailySchedulePanel
-              day={railDay}
-              tasks={railDayTasks}
-              pendingTask={pendingTask}
-              onDropPendingIntoSlot={handleDropPendingIntoSlot}
-              onOpenTask={handleOpenTaskDetail}
-              onToggleTask={handleToggleScheduledTask}
-              onStepDay={stepRailDay}
-              disablePrev={!railCanPrev}
-              disableNext={!railCanNext}
-              onToday={handleResetToToday}
-            />
-          )
-        ) : null}
-      </View>
-
-      <CreateListModal
-        visible={createModalOpen}
-        value={newListName}
-        onChangeValue={setNewListName}
-        onClose={() => {
-          setCreateModalOpen(false);
-          setNewListName("");
-        }}
-        onSubmit={() => handleCreateList(newListName)}
-        loading={creatingList}
-      />
-      <AppSettingsModal
-        visible={settingsModalOpen}
-        onClose={() => setSettingsModalOpen(false)}
-        userEmail={userEmail}
-        onOpenFullSettings={() => {
-          setSettingsModalOpen(false);
-          router.push("/settings/personalization");
-        }}
-      />
-      <DeleteListModal
-        visible={Boolean(deleteTarget)}
-        list={deleteTarget}
-        taskCount={deleteTaskCount}
-        checkingTasks={checkingDeleteTasks}
-        submitting={deletingList}
-        inboxList={inboxList ?? null}
-        lists={orderedLists}
-        onClose={handleCloseDeleteModal}
-        onConfirm={handleConfirmDeleteList}
-      />
-      <TaskDetailModal taskId={taskDetailId} onClose={() => setTaskDetailId(null)} />
-      </SafeAreaView>
-    </PlannerStylesContext.Provider>
-  );
-}
-
-type BacklogPanelProps = {
-  lists: RemoteList[];
-  activeListId: string | null;
-  onSelectList: (listId: string) => void;
-  tasks: LocalTask[];
-  isLoading: boolean;
-  onAddTask: (title: string) => Promise<void>;
-  onToggleTask: (task: LocalTask) => Promise<void>;
-  onBeginSchedule: (task: LocalTask) => void;
-  onCreateList: () => void;
-  onOpenTask: (task: LocalTask) => void;
-  onDeleteList: (list: RemoteList) => void;
-  undeletableListId: string | null;
-};
-
-function BacklogPanel({
-  lists,
-  activeListId,
-  onSelectList,
-  tasks,
-  isLoading,
-  onAddTask,
-  onToggleTask,
-  onBeginSchedule,
-  onCreateList,
-  onOpenTask,
-  onDeleteList,
-  undeletableListId,
-}: BacklogPanelProps) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  const activeList = lists.find((list) => list.id === activeListId) ?? lists[0];
-  return (
-    <View style={styles.backlogPanel}>
-      <Text style={styles.panelEyebrow}>Lists</Text>
-      <ScrollView style={styles.drawerListScroll}>
-        {lists.map((list) => {
-          const active = list.id === activeList?.id;
-          const disableDelete = list.id === undeletableListId;
-          return (
-            <Pressable
-              key={list.id}
-              onPress={() => onSelectList(list.id)}
-              style={[styles.drawerListItem, active && styles.drawerListItemActive]}
-            >
-              <Text style={[styles.drawerListLabel, active && styles.drawerListLabelActive]} numberOfLines={1}>
-                {list.name ?? "Untitled"}
-              </Text>
-              {!disableDelete ? (
-                <Pressable
-                  onPress={(event) => {
-                    event.stopPropagation();
-                    onDeleteList(list);
-                  }}
-                  style={styles.listDeleteButton}
-                  hitSlop={10}
-                >
-                  <Ionicons name="trash-outline" size={14} color={colors.textMuted} />
-                </Pressable>
-              ) : null}
-            </Pressable>
-          );
-        })}
-        <Pressable style={styles.newListButton} onPress={onCreateList}>
-          <Ionicons name="add" size={14} color={colors.accentMuted} />
-          <Text style={styles.newListButtonText}>New List</Text>
-        </Pressable>
-      </ScrollView>
-
-      <View style={styles.drawerTasks}>
-        <Text style={styles.drawerTasksTitle}>{activeList?.name ?? "Inbox"}</Text>
-        <AddTaskInput placeholder={`Add to ${activeList?.name ?? "Inbox"}`} onSubmit={onAddTask} />
-        {isLoading ? (
-          <ActivityIndicator color={colors.accentMuted} />
-        ) : (
-          <FlashList
-            data={tasks}
-            estimatedItemSize={64}
-            keyExtractor={(item) => item.id}
-            renderItem={({ item }) => (
-              <ListTaskItem
-                task={item}
-                onToggle={onToggleTask}
-                onPress={() => onOpenTask(item)}
-                subtitle={item.notes ?? undefined}
-                onBeginDrag={onBeginSchedule}
+            {viewMode === "calendar" ? (
+              <PlannerWeekCalendarGrid
+                days={plannerDays}
+                tasksByDay={scheduledByDay}
+                pendingTask={pendingTask}
+                onDropPendingIntoDay={handleDropPendingIntoDay}
+                onDropPendingIntoSlot={handleDropPendingIntoSlot}
+                onOpenTask={handleOpenTaskDetail}
+                onToggleTask={handleToggleScheduledTask}
+                onSelectDay={(dayKey) => setSelectedDayKey(dayKey)}
+                selectedDayKey={resolvedSelectedDayKey}
+                gridHeight={calendarGridHeight}
+              />
+            ) : (
+              <PlannerTaskBoard
+                days={taskDays}
+                tasksByDay={scheduledByDay}
+                pendingTask={pendingTask}
+                onDropPending={handleDropPendingIntoDay}
+                onAddTask={handleAddScheduledTask}
+                onToggleTask={handleToggleScheduledTask}
+                onOpenTask={handleOpenTaskDetail}
+                onSelectDay={(dayKey) => setSelectedDayKey(dayKey)}
+                selectedDayKey={resolvedSelectedDayKey}
+                onReachPast={() => extendTaskDays("past")}
+                onReachFuture={() => extendTaskDays("future")}
+                listRef={taskBoardRef}
+                onVisibleRangeChange={handleTaskBoardVisibleRangeChange}
               />
             )}
-            ListEmptyComponent={<Text style={styles.emptyListText}>No tasks yet</Text>}
-          />
-        )}
-      </View>
-    </View>
-  );
-}
-
-type PlannerHeroProps = {
-  viewMode: ViewMode;
-  onChangeViewMode: (mode: ViewMode) => void;
-  rangeLabel: string;
-  onPrev: () => void;
-  onNext: () => void;
-  onToday: () => void;
-  onOpenSettings: () => void;
-};
-
-function PlannerHero({
-  viewMode,
-  onChangeViewMode,
-  rangeLabel,
-  onPrev,
-  onNext,
-  onToday,
-  onOpenSettings,
-}: PlannerHeroProps) {
-  const styles = usePlannerStyles();
-  return (
-    <View style={styles.heroBar}>
-      <View style={styles.heroLeft}>
-        <Text style={styles.heroEyebrow}>Planner</Text>
-        <Text style={styles.heroRange}>{rangeLabel}</Text>
-      </View>
-      <View style={styles.heroControls}>
-        <View style={styles.navGroup}>
-          <IconButton icon="chevron-back" onPress={onPrev} />
-          <Pressable style={styles.todayButton} onPress={onToday}>
-            <Text style={styles.todayButtonText}>Today</Text>
-          </Pressable>
-          <IconButton icon="chevron-forward" onPress={onNext} />
-        </View>
-        <SegmentedControl
-          size="sm"
-          options={[
-            { label: "Calendar", value: "calendar" },
-            { label: "Tasks", value: "tasks" },
-          ]}
-          value={viewMode}
-          onChange={(next) => onChangeViewMode(next as ViewMode)}
-        />
-        <IconButton icon="person-circle" onPress={onOpenSettings} />
-      </View>
-    </View>
-  );
-}
-
-function IconButton({
-  icon,
-  onPress,
-  disabled,
-}: {
-  icon: keyof typeof Ionicons.glyphMap;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  return (
-    <Pressable
-      style={[styles.iconButton, disabled && styles.iconButtonDisabled]}
-      onPress={!disabled ? onPress : undefined}
-    >
-      <Ionicons name={icon} size={16} color={disabled ? colors.textMuted : colors.text} />
-    </Pressable>
-  );
-}
-
-type TaskPlannerBoardProps = {
-  days: PlannerDay[];
-  tasksByDay: Record<string, LocalTask[]>;
-  pendingTask: LocalTask | null;
-  onDropPending: (dayKey: string) => Promise<void>;
-  onAddTask: (dayKey: string, title: string) => Promise<void>;
-  onToggleTask: (task: LocalTask) => Promise<void>;
-  onOpenTask: (task: LocalTask) => void;
-  onSelectDay: (dayKey: string) => void;
-  selectedDayKey: string;
-  onReachPast?: () => void;
-  onReachFuture?: () => void;
-  listRef?: MutableRefObject<FlashListType<PlannerDay> | null>;
-  onVisibleRangeChange?: (start: PlannerDay | null, end: PlannerDay | null) => void;
-};
-
-function TaskPlannerBoard({
-  days,
-  tasksByDay,
-  pendingTask,
-  onDropPending,
-  onAddTask,
-  onToggleTask,
-  onOpenTask,
-  onSelectDay,
-  selectedDayKey,
-  onReachPast,
-  onReachFuture,
-  listRef,
-  onVisibleRangeChange,
-}: TaskPlannerBoardProps) {
-  const styles = usePlannerStyles();
-  const dayIndexMap = useMemo(() => {
-    const map: Record<string, number> = {};
-    days.forEach((day, index) => {
-      map[day.key] = index;
-    });
-    return map;
-  }, [days]);
-  const viewabilityConfig = useMemo(() => ({ itemVisiblePercentThreshold: 60 }), []);
-  const handleViewableItemsChanged = useCallback(
-    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
-      if (!onVisibleRangeChange) return;
-      let minIndex = Number.POSITIVE_INFINITY;
-      let maxIndex = -1;
-      viewableItems.forEach((token) => {
-        const key =
-          typeof token.key === "string" || typeof token.key === "number" ? String(token.key) : null;
-        if (!key) return;
-        const index = dayIndexMap[key];
-        if (index === undefined) return;
-        if (index < minIndex) minIndex = index;
-        if (index > maxIndex) maxIndex = index;
-      });
-      if (minIndex === Number.POSITIVE_INFINITY || maxIndex === -1) return;
-      const startDay = days[minIndex];
-      const endDay = days[maxIndex];
-      if (startDay && endDay) {
-        onVisibleRangeChange(startDay, endDay);
-      }
-    },
-    [dayIndexMap, days, onVisibleRangeChange],
-  );
-  return (
-    <FlashList
-      ref={listRef ?? null}
-      horizontal
-      data={days}
-      estimatedItemSize={DAY_COLUMN_WIDTH + 16}
-      keyExtractor={(day) => day.key}
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={styles.taskBoardRow}
-      onEndReached={onReachFuture}
-      onEndReachedThreshold={0.4}
-      onStartReached={onReachPast}
-      onStartReachedThreshold={0.4}
-      onViewableItemsChanged={handleViewableItemsChanged}
-      viewabilityConfig={viewabilityConfig}
-      renderItem={({ item: day }) => {
-        const dayTasks = tasksByDay[day.key] ?? [];
-        const isSelected = day.key === selectedDayKey;
-        return (
-          <View style={[styles.taskColumn, isSelected && styles.taskColumnSelected]}>
-            <Pressable style={styles.taskColumnHeader} onPress={() => onSelectDay(day.key)}>
-              <Text style={styles.taskColumnDay}>{day.weekday}</Text>
-              <Text style={styles.taskColumnDate}>{`${day.monthText} ${day.dayNumber}`}</Text>
-            </Pressable>
-            {pendingTask ? (
-              <Pressable style={styles.dropZone} onPress={() => onDropPending(day.key)}>
-                <Text style={styles.dropZoneLabel}>Drop “{pendingTask.title}” here</Text>
-              </Pressable>
-            ) : null}
-            {dayTasks.map((task) => (
-              <TaskCard key={task.id} task={task} onToggleStatus={onToggleTask} onPress={() => onOpenTask(task)} />
-            ))}
-            <AddTaskInput placeholder="Add a task" onSubmit={(title) => onAddTask(day.key, title)} />
           </View>
-        );
-      }}
-    />
-  );
-}
-
-type WeekCalendarGridProps = {
-  days: PlannerDay[];
-  tasksByDay: Record<string, LocalTask[]>;
-  pendingTask: LocalTask | null;
-  onDropPendingIntoDay: (dayKey: string) => Promise<void>;
-  onDropPendingIntoSlot: (dayKey: string, hour: number) => Promise<void>;
-  onOpenTask: (task: LocalTask) => void;
-  onToggleTask: (task: LocalTask) => Promise<void>;
-  onSelectDay: (dayKey: string) => void;
-  selectedDayKey: string;
-  gridHeight: number;
-};
-
-function WeekCalendarGrid({
-  days,
-  tasksByDay,
-  pendingTask,
-  onDropPendingIntoDay,
-  onDropPendingIntoSlot,
-  onOpenTask,
-  onToggleTask,
-  onSelectDay,
-  selectedDayKey,
-  gridHeight,
-}: WeekCalendarGridProps) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.calendarGridWrapper}>
-      <View style={styles.calendarGrid}>
-        <View style={styles.calendarGridHeader}>
-          <View style={styles.calendarGridCorner}>
-            {pendingTask ? (
-              <Pressable onPress={() => onDropPendingIntoDay(days[0]?.key ?? "")}>
-                <Text style={styles.bannerLink}>Place “{pendingTask.title}” at start</Text>
-              </Pressable>
-            ) : null}
-          </View>
-          {days.map((day) => (
-            <Pressable
-              key={day.key}
-              style={[
-                styles.calendarHeaderCell,
-                day.key === selectedDayKey && styles.calendarHeaderCellSelected,
-              ]}
-              onPress={() => onSelectDay(day.key)}
-            >
-              <Text style={styles.calendarHeaderDay}>{day.weekday}</Text>
-              <Text style={styles.calendarHeaderDate}>{`${day.monthText} ${day.dayNumber}`}</Text>
-            </Pressable>
-          ))}
-        </View>
-        <ScrollView
-          style={[styles.calendarGridScroll, { height: gridHeight }]}
-          contentContainerStyle={styles.calendarGridBody}
-          showsVerticalScrollIndicator={false}
-        >
-          <View style={styles.calendarHoursColumn}>
-            {HOURS.map((hour, index) => (
-              <View
-                key={hour}
-                style={[styles.calendarHourRow, index === HOURS.length - 1 && styles.calendarHourRowLast]}
-              >
-                <Text style={styles.calendarHourText}>{formatHourLabel(hour)}</Text>
-              </View>
-            ))}
-          </View>
-          {days.map((day) => {
-            const dayTasks = (tasksByDay[day.key] ?? []).filter((task) => Boolean(task.planned_start));
-            return (
-              <View key={day.key} style={styles.calendarDayColumn}>
-                <View style={styles.calendarDaySlots}>
-                  {HOURS.map((hour, index) => (
-                    <Pressable
-                      key={`${day.key}-${hour}`}
-                      style={[
-                        styles.calendarDaySlot,
-                        day.key === selectedDayKey && styles.calendarDaySlotSelected,
-                        index === HOURS.length - 1 && styles.calendarDaySlotLast,
-                      ]}
-                      onPress={() => (pendingTask ? onDropPendingIntoSlot(day.key, hour) : undefined)}
-                    />
-                  ))}
-                </View>
-                <View style={[styles.calendarDayTasks, { height: HOURS.length * HOUR_BLOCK_HEIGHT }]} pointerEvents="box-none">
-                  {dayTasks.map((task) => {
-                    const metrics = getTaskTimeMetrics(task);
-                    if (!metrics) return null;
-                    const top = (metrics.startMinutes / 60) * HOUR_BLOCK_HEIGHT;
-                    const height = Math.max(28, (metrics.durationMinutes / 60) * HOUR_BLOCK_HEIGHT);
-                    return (
-                      <Pressable
-                        key={task.id}
-                        style={[styles.calendarBlock, styles.calendarBlockFloating, { top, height }]}
-                        onPress={() => onOpenTask(task)}
-                      >
-                        <Text style={styles.calendarBlockText}>{task.title}</Text>
-                        <Pressable onPress={() => onToggleTask(task)}>
-                          <Ionicons
-                            name={task.status === "done" ? "checkmark-circle" : "ellipse-outline"}
-                            size={14}
-                            color={task.status === "done" ? colors.successAlt : colors.textSecondary}
-                          />
-                        </Pressable>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            );
-          })}
-        </ScrollView>
-      </View>
-    </ScrollView>
-  );
-}
-
-type DailyTaskPanelProps = {
-  day: PlannerDay | undefined;
-  tasks: LocalTask[];
-  onAddTask: (title: string) => Promise<void>;
-  onToggleTask: (task: LocalTask) => Promise<void>;
-  onOpenTask: (task: LocalTask) => void;
-  onStepDay: (delta: number) => void;
-  onToday: () => void;
-  disablePrev: boolean;
-  disableNext: boolean;
-};
-
-function DailyTaskPanel({
-  day,
-  tasks,
-  onAddTask,
-  onToggleTask,
-  onOpenTask,
-  onStepDay,
-  onToday,
-  disablePrev,
-  disableNext,
-}: DailyTaskPanelProps) {
-  const styles = usePlannerStyles();
-  if (!day) return null;
-  return (
-    <View style={styles.timeboxPanel}>
-      <View style={styles.panelHeader}>
-        <Text style={styles.panelTitle}>Tasks</Text>
-        <View style={styles.panelNav}>
-          <IconButton icon="chevron-back" onPress={() => onStepDay(-1)} disabled={disablePrev} />
-          <Pressable style={styles.todayButton} onPress={onToday}>
-            <Text style={styles.todayButtonText}>Today</Text>
-          </Pressable>
-          <IconButton icon="chevron-forward" onPress={() => onStepDay(1)} disabled={disableNext} />
-        </View>
-      </View>
-      <Text style={styles.timeboxDate}>{`${day.weekday}, ${day.monthText} ${day.dayNumber}`}</Text>
-      <AddTaskInput placeholder="Add timed task" onSubmit={onAddTask} />
-      <ScrollView style={styles.timeboxList}>
-        {tasks.map((task) => (
-          <TaskCard key={task.id} task={task} onToggleStatus={onToggleTask} onPress={() => onOpenTask(task)} />
-        ))}
-      </ScrollView>
-    </View>
-  );
-}
-
-type DailySchedulePanelProps = {
-  day: PlannerDay | undefined;
-  tasks: LocalTask[];
-  pendingTask: LocalTask | null;
-  onDropPendingIntoSlot: (dayKey: string, hour: number) => Promise<void>;
-  onOpenTask: (task: LocalTask) => void;
-  onToggleTask: (task: LocalTask) => Promise<void>;
-  onStepDay: (delta: number) => void;
-  disablePrev: boolean;
-  disableNext: boolean;
-  onToday: () => void;
-};
-
-function DailySchedulePanel({
-  day,
-  tasks,
-  pendingTask,
-  onDropPendingIntoSlot,
-  onOpenTask,
-  onToggleTask,
-  onStepDay,
-  disablePrev,
-  disableNext,
-  onToday,
-}: DailySchedulePanelProps) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  if (!day) return null;
-  const scheduledTasks = tasks.filter((task) => Boolean(task.planned_start));
-  return (
-    <View style={styles.timeboxPanel}>
-      <View style={styles.panelHeader}>
-        <Text style={styles.panelTitle}>Schedule</Text>
-        <View style={styles.panelNav}>
-          <IconButton icon="chevron-back" onPress={() => onStepDay(-1)} disabled={disablePrev} />
-          <Pressable style={styles.todayButton} onPress={onToday}>
-            <Text style={styles.todayButtonText}>Today</Text>
-          </Pressable>
-          <IconButton icon="chevron-forward" onPress={() => onStepDay(1)} disabled={disableNext} />
-        </View>
-      </View>
-      <Text style={styles.timeboxDate}>{`${day.weekday}, ${day.monthText} ${day.dayNumber}`}</Text>
-      <ScrollView style={styles.dayScheduleScroll} showsVerticalScrollIndicator={false}>
-        <View style={styles.dayScheduleGrid}>
-          <View style={styles.calendarHoursColumn}>
-            {HOURS.map((hour, index) => (
-              <View
-                key={`${day.key}-hour-${hour}`}
-                style={[styles.calendarHourRow, index === HOURS.length - 1 && styles.calendarHourRowLast]}
-              >
-                <Text style={styles.calendarHourText}>{formatHourLabel(hour)}</Text>
-              </View>
-            ))}
-          </View>
-          <View style={styles.dayScheduleColumn}>
-            <View style={styles.dayScheduleSlots}>
-              {HOURS.map((hour, index) => (
-                <Pressable
-                  key={`${day.key}-slot-${hour}`}
-                  style={[styles.dayScheduleSlot, index === HOURS.length - 1 && styles.dayScheduleSlotLast]}
-                  onPress={() => (pendingTask ? onDropPendingIntoSlot(day.key, hour) : undefined)}
-                />
-              ))}
-            </View>
-            <View style={[styles.dayScheduleTasks, { height: HOURS.length * HOUR_BLOCK_HEIGHT }]} pointerEvents="box-none">
-              {scheduledTasks.map((task) => {
-                const metrics = getTaskTimeMetrics(task);
-                if (!metrics) return null;
-                const top = (metrics.startMinutes / 60) * HOUR_BLOCK_HEIGHT;
-                const height = Math.max(28, (metrics.durationMinutes / 60) * HOUR_BLOCK_HEIGHT);
-                return (
-                  <Pressable
-                    key={task.id}
-                    style={[styles.calendarBlock, styles.calendarBlockFloating, { top, height }]}
-                    onPress={() => onOpenTask(task)}
-                  >
-                    <Text style={styles.calendarBlockText}>{task.title}</Text>
-                    <Pressable onPress={() => onToggleTask(task)}>
-                      <Ionicons
-                        name={task.status === "done" ? "checkmark-circle" : "ellipse-outline"}
-                        size={14}
-                        color={task.status === "done" ? colors.successAlt : colors.textSecondary}
-                      />
-                    </Pressable>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        </View>
-      </ScrollView>
-    </View>
-  );
-}
-
-type CreateListModalProps = {
-  visible: boolean;
-  value: string;
-  onChangeValue: (value: string) => void;
-  onClose: () => void;
-  onSubmit: () => void;
-  loading: boolean;
-};
-
-function CreateListModal({ visible, value, onChangeValue, onClose, onSubmit, loading }: CreateListModalProps) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose}>
-        <Pressable style={styles.modalCard} onPress={(event) => event.stopPropagation()}>
-          <Text style={styles.modalTitle}>New List</Text>
-          <TextInput
-            style={styles.modalInput}
-            placeholder="List name"
-            placeholderTextColor={colors.placeholder}
-            value={value}
-            onChangeText={onChangeValue}
-            autoFocus
-          />
-          <View style={styles.modalActions}>
-            <Pressable onPress={onClose} style={styles.modalGhostButton}>
-              <Text style={styles.modalGhostText}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.modalPrimaryButton, (!value.trim() || loading) && styles.modalPrimaryDisabled]}
-              disabled={!value.trim() || loading}
-              onPress={onSubmit}
-            >
-              {loading ? <ActivityIndicator color={colors.primaryText} /> : <Text style={styles.modalPrimaryText}>Create</Text>}
-            </Pressable>
-          </View>
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
-
-type DeleteListModalProps = {
-  visible: boolean;
-  list: RemoteList | null;
-  taskCount: number | null;
-  checkingTasks: boolean;
-  submitting: boolean;
-  inboxList: RemoteList | null;
-  lists: RemoteList[];
-  onClose: () => void;
-  onConfirm: (action: DeleteAction, targetListId?: string | null) => void;
-};
-
-function DeleteListModal({
-  visible,
-  list,
-  taskCount,
-  checkingTasks,
-  submitting,
-  inboxList,
-  lists,
-  onClose,
-  onConfirm,
-}: DeleteListModalProps) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  const [action, setAction] = useState<DeleteAction>("delete");
-  const [moveTargetId, setMoveTargetId] = useState<string | null>(null);
-
-  useEffect(() => {
-    setAction("delete");
-    setMoveTargetId(null);
-  }, [visible, list?.id]);
-
-  if (!list) return null;
-
-  const listName = list.name ?? "Untitled list";
-  const hasTasks = (taskCount ?? 0) > 0;
-  const availableTargets = lists.filter(
-    (candidate) => candidate.id !== list.id && candidate.id !== inboxList?.id,
-  );
-  const inboxDisabled = !inboxList || inboxList.id === list.id;
-  const otherDisabled = availableTargets.length === 0;
-
-  function selectAction(next: DeleteAction) {
-    setAction(next);
-    if (next === "move_other") {
-      setMoveTargetId((current) => current ?? availableTargets[0]?.id ?? null);
-    } else {
-      setMoveTargetId(null);
-    }
-  }
-
-  const confirmDisabled =
-    checkingTasks ||
-    submitting ||
-    (hasTasks && action === "move_other" && (otherDisabled || !moveTargetId)) ||
-    (hasTasks && action === "move_inbox" && inboxDisabled);
-
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose}>
-        <Pressable style={styles.modalCard} onPress={(event) => event.stopPropagation()}>
-          <Text style={styles.modalTitle}>{`Delete “${listName}”`}</Text>
-          {checkingTasks ? (
-            <View style={styles.deleteListStatus}>
-              <ActivityIndicator color={colors.accent} />
-              <Text style={styles.deleteListDescription}>Checking tasks in this list…</Text>
-            </View>
-          ) : hasTasks ? (
-            <>
-              <Text style={styles.deleteListDescription}>
-                This list contains {taskCount} task{taskCount === 1 ? "" : "s"}. Choose what to do with them before
-                deleting the list.
-              </Text>
-              <View style={styles.deleteOptionGroup}>
-                <Pressable
-                  style={styles.deleteOptionRow}
-                  onPress={() => selectAction("delete")}
-                >
-                  <Ionicons
-                    name={action === "delete" ? "radio-button-on" : "radio-button-off"}
-                    size={18}
-                    color={colors.text}
-                  />
-                  <View style={styles.deleteOptionLabels}>
-                    <Text style={styles.deleteOptionTitle}>Delete the tasks</Text>
-                    <Text style={styles.deleteOptionSubtitle}>Remove every task in this list forever.</Text>
-                  </View>
-                </Pressable>
-                <Pressable
-                  style={[styles.deleteOptionRow, inboxDisabled && styles.deleteOptionDisabled]}
-                  onPress={() => !inboxDisabled && selectAction("move_inbox")}
-                >
-                  <Ionicons
-                    name={action === "move_inbox" ? "radio-button-on" : "radio-button-off"}
-                    size={18}
-                    color={colors.text}
-                  />
-                  <View style={styles.deleteOptionLabels}>
-                    <Text style={styles.deleteOptionTitle}>Move tasks to Inbox</Text>
-                    <Text style={styles.deleteOptionSubtitle}>Keep everything and move it to Inbox.</Text>
-                  </View>
-                </Pressable>
-                <Pressable
-                  style={[styles.deleteOptionRow, otherDisabled && styles.deleteOptionDisabled]}
-                  onPress={() => !otherDisabled && selectAction("move_other")}
-                >
-                  <Ionicons
-                    name={action === "move_other" ? "radio-button-on" : "radio-button-off"}
-                    size={18}
-                    color={colors.text}
-                  />
-                  <View style={styles.deleteOptionLabels}>
-                    <Text style={styles.deleteOptionTitle}>Move tasks to another list</Text>
-                    <Text style={styles.deleteOptionSubtitle}>Choose another list to keep these tasks.</Text>
-                  </View>
-                </Pressable>
-              </View>
-              {action === "move_other" && !otherDisabled ? (
-                <View style={styles.moveListPicker}>
-                  {availableTargets.map((target) => {
-                    const selected = moveTargetId === target.id;
-                    return (
-                      <Pressable
-                        key={target.id}
-                        style={[styles.moveListOption, selected && styles.moveListOptionActive]}
-                        onPress={() => setMoveTargetId(target.id)}
-                      >
-                        <Text style={[styles.moveListOptionText, selected && styles.moveListOptionTextActive]}>
-                          {target.name ?? "Untitled"}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              ) : null}
-            </>
-          ) : (
-            <Text style={styles.deleteListDescription}>
-              Are you sure you want to delete this list? This action cannot be undone.
-            </Text>
-          )}
-          <View style={styles.modalActions}>
-            <Pressable onPress={onClose} style={styles.modalGhostButton} disabled={submitting}>
-              <Text style={styles.modalGhostText}>Cancel</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => onConfirm(action, moveTargetId)}
-              style={[styles.modalPrimaryButton, (confirmDisabled || submitting) && styles.modalPrimaryDisabled]}
-              disabled={confirmDisabled || submitting}
-            >
-              {submitting ? (
-                <ActivityIndicator color={colors.primaryText} />
-              ) : (
-                <Text style={styles.modalPrimaryText}>Delete list</Text>
-              )}
-            </Pressable>
-          </View>
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
-
-type AppSettingsModalProps = {
-  visible: boolean;
-  onClose: () => void;
-  userEmail: string;
-  onOpenFullSettings: () => void;
-};
-
-function AppSettingsModal({ visible, onClose, userEmail, onOpenFullSettings }: AppSettingsModalProps) {
-  const { signOut, session } = useAuth();
-  const displayName =
-    (session?.user.user_metadata?.display_name as string | undefined) ??
-    (session?.user.user_metadata?.full_name as string | undefined) ??
-    (session?.user.user_metadata?.name as string | undefined) ??
-    "";
-  const headerLabel = displayName || userEmail || "You";
-  const initials = headerLabel
-    .split(" ")
-    .map((part) => part[0]?.toUpperCase() ?? "")
-    .join("")
-    .slice(0, 2);
-  const styles = usePlannerStyles();
-  const { colors, preference, setPreference } = useTheme();
-  const [notifications, setNotifications] = useState(true);
-  const [rollover, setRollover] = useState(true);
-  const [autoTheme, setAutoTheme] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
-
-  async function handleSignOut() {
-    if (signingOut) return;
-    try {
-      setSigningOut(true);
-      await signOut();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Please try again.";
-      Alert.alert("Unable to sign out", message);
-    } finally {
-      setSigningOut(false);
-    }
-  }
-
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose}>
-        <Pressable style={styles.settingsModalCard} onPress={(event) => event.stopPropagation()}>
-          <View style={styles.settingsHeader}>
-            <View style={styles.settingsHeaderInfo}>
-              <View style={styles.settingsAvatar}>
-              <Text style={styles.settingsAvatarText}>{initials || "U"}</Text>
-            </View>
-            <View>
-              <Text style={styles.settingsUserName}>{displayName || userEmail}</Text>
-              <Text style={styles.settingsUserEmail}>{userEmail}</Text>
-            </View>
-          </View>
-            <Pressable
-              style={[styles.settingsSignOutButton, signingOut && styles.settingsSignOutButtonDisabled]}
-              onPress={handleSignOut}
-              disabled={signingOut}
-            >
-              {signingOut ? (
-                <ActivityIndicator size="small" color={colors.dangerText} />
-              ) : (
-                <Text style={styles.settingsSignOutText}>Sign Out</Text>
-              )}
-            </Pressable>
-          </View>
-          <ScrollView style={styles.settingsModalScroll} contentContainerStyle={styles.settingsModalScrollContent}>
-            <View style={styles.settingsSection}>
-              <Text style={styles.settingsSectionTitle}>Appearance</Text>
-              <SegmentedControl
-                size="sm"
-                value={preference}
-                options={[
-                  { label: "System", value: "system" },
-                  { label: "Light", value: "light" },
-                  { label: "Dark", value: "dark" },
-                ]}
-                onChange={(next) => setPreference(next as typeof preference)}
+          {showTimebox && (viewMode === "calendar" ? selectedDay : railDay) ? (
+            viewMode === "calendar" ? (
+              <PlannerDailyTaskPanel
+                day={selectedDay}
+                tasks={selectedDayTasks}
+                onAddTask={(title) => handleAddScheduledTask(selectedDay.key, title)}
+                onToggleTask={handleToggleScheduledTask}
+                onOpenTask={handleOpenTaskDetail}
+                onStepDay={stepSelectedDay}
+                onToday={handleResetToToday}
+                disablePrev={!selectedCanPrev}
+                disableNext={!selectedCanNext}
               />
-              <SettingsToggleRow
-                label="Auto-dark mode at sunset"
-                value={autoTheme}
-                onValueChange={setAutoTheme}
+            ) : (
+              <PlannerDailySchedulePanel
+                day={railDay}
+                tasks={railDayTasks}
+                pendingTask={pendingTask}
+                onDropPendingIntoSlot={handleDropPendingIntoSlot}
+                onOpenTask={handleOpenTaskDetail}
+                onToggleTask={handleToggleScheduledTask}
+                onStepDay={stepRailDay}
+                disablePrev={!railCanPrev}
+                disableNext={!railCanNext}
+                onToday={handleResetToToday}
               />
-            </View>
-            <View style={styles.settingsSection}>
-              <Text style={styles.settingsSectionTitle}>Behaviors</Text>
-              <SettingsToggleRow
-                label="Roll over incomplete tasks"
-                value={rollover}
-                onValueChange={setRollover}
-              />
-              <SettingsToggleRow
-                label="Notifications"
-                value={notifications}
-                onValueChange={setNotifications}
-              />
-            </View>
-          </ScrollView>
-          <View style={styles.modalActions}>
-            <Pressable onPress={onOpenFullSettings} style={styles.modalPrimaryButton}>
-              <Text style={styles.modalPrimaryText}>Open settings</Text>
-            </Pressable>
-            <Pressable onPress={onClose} style={styles.modalGhostButton}>
-              <Text style={styles.modalGhostText}>Close</Text>
-            </Pressable>
-          </View>
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
-
-type TaskDetailModalProps = {
-  taskId: string | null;
-  onClose: () => void;
-};
-
-function TaskDetailModal({ taskId, onClose }: TaskDetailModalProps) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  return (
-    <Modal visible={Boolean(taskId)} transparent animationType="fade" onRequestClose={onClose}>
-      <Pressable style={styles.modalBackdrop} onPress={onClose}>
-        <Pressable style={styles.taskDetailModalCard} onPress={(event) => event.stopPropagation()}>
-          <View style={styles.taskDetailHeader}>
-            <Text style={styles.taskDetailTitle}>Task Details</Text>
-            <Pressable onPress={onClose} style={styles.taskDetailClose}>
-              <Ionicons name="close" size={18} color={colors.text} />
-            </Pressable>
-          </View>
-          {taskId ? (
-            <TaskDetailView taskId={taskId} scrollStyle={styles.taskDetailScroll} contentStyle={styles.taskDetailContent} />
+            )
           ) : null}
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
+        </View>
 
-function SettingsToggleRow({
-  label,
-  value,
-  onValueChange,
-}: {
-  label: string;
-  value: boolean;
-  onValueChange: (next: boolean) => void;
-}) {
-  const styles = usePlannerStyles();
-  const { colors } = useTheme();
-  return (
-    <View style={styles.settingsToggleRow}>
-      <Text style={styles.settingsToggleLabel}>{label}</Text>
-      <Switch
-        value={value}
-        onValueChange={onValueChange}
-        thumbColor={colors.surface}
-        trackColor={{ true: colors.accent, false: colors.borderMuted }}
-      />
-    </View>
+        <PlannerCreateListModal
+          visible={createModalOpen}
+          value={newListName}
+          onChangeValue={setNewListName}
+          onClose={() => {
+            setCreateModalOpen(false);
+            setNewListName("");
+          }}
+          onSubmit={() => handleCreateList(newListName)}
+          loading={creatingList}
+        />
+        <PlannerAppSettingsModal
+          visible={settingsModalOpen}
+          onClose={() => setSettingsModalOpen(false)}
+          userEmail={userEmail}
+          onOpenFullSettings={() => {
+            setSettingsModalOpen(false);
+            router.push("/settings/personalization");
+          }}
+        />
+        <PlannerDeleteListModal
+          visible={Boolean(deleteTarget)}
+          list={deleteTarget}
+          taskCount={deleteTaskCount}
+          checkingTasks={checkingDeleteTasks}
+          submitting={deletingList}
+          inboxList={inboxList ?? null}
+          lists={orderedLists}
+          onClose={handleCloseDeleteModal}
+          onConfirm={handleConfirmDeleteList}
+        />
+        <PlannerTaskDetailModal taskId={taskDetailId} onClose={() => setTaskDetailId(null)} />
+      </SafeAreaView>
+    </PlannerStylesContext.Provider>
   );
 }
 
@@ -1673,6 +697,11 @@ function createStyles(colors: ThemeColors) {
     backgroundColor: colors.surface,
     borderRightWidth: 1,
     borderColor: colors.border,
+  },
+  panelHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   panelEyebrow: {
     textTransform: "uppercase",
@@ -1729,6 +758,33 @@ function createStyles(colors: ThemeColors) {
   emptyListText: {
     color: colors.textMuted,
     marginTop: 8,
+    textAlign: "center",
+  },
+  listBlock: {
+    marginBottom: 24,
+  },
+  listBlockHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  listBlockTitle: {
+    color: colors.text,
+    fontWeight: "700",
+    flex: 1,
+  },
+  listBlockHeaderRight: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  listTaskCount: {
+    color: colors.textSecondary,
+    fontSize: 12,
+  },
+  listTasksContainer: {
+    gap: 8,
   },
   centerPane: {
     flex: 1,
