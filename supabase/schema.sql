@@ -36,7 +36,7 @@ create table public.tasks (
   estimate_minutes int,
   actual_minutes int,
   priority int default 0,
-  sort_index int default 0,
+  sort_index double precision default 0,
   created_at timestamptz default timezone('utc', now()),
   updated_at timestamptz default timezone('utc', now())
 );

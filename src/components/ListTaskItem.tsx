@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import type { LocalTask } from "../lib/db";
 import { useTheme } from "../contexts/ThemeContext";
 import type { ThemeColors, ThemeMode } from "../theme";
@@ -9,10 +10,12 @@ type Props = {
   onToggle: (task: LocalTask) => void;
   onPress?: (task: LocalTask) => void;
   subtitle?: string | null;
-  onBeginDrag?: (task: LocalTask) => void;
+  dataSet?: Record<string, string>;
+  active?: boolean;
+  showGrabHandle?: boolean;
 };
 
-export function ListTaskItem({ task, onToggle, onPress, subtitle, onBeginDrag }: Props) {
+export function ListTaskItem({ task, onToggle, onPress, subtitle, dataSet, active = false, showGrabHandle = false }: Props) {
   const isDone = task.status === "done";
   const { colors, mode } = useTheme();
   const styles = useMemo(() => createStyles(colors, mode), [colors, mode]);
@@ -20,9 +23,9 @@ export function ListTaskItem({ task, onToggle, onPress, subtitle, onBeginDrag }:
   return (
     <Pressable
       onPress={() => onPress?.(task)}
-      style={[styles.card, isDone && styles.cardDone]}
-      onLongPress={() => onBeginDrag?.(task)}
-      delayLongPress={250}
+      style={[styles.card, isDone && styles.cardDone, active && styles.cardActive]}
+      dataSet={dataSet}
+      collapsable={false}
     >
       <Pressable onPress={() => onToggle(task)} style={[styles.checkbox, isDone && styles.checkboxDone]} />
       <View style={styles.content}>
@@ -35,6 +38,11 @@ export function ListTaskItem({ task, onToggle, onPress, subtitle, onBeginDrag }:
           </Text>
         ) : null}
       </View>
+      {showGrabHandle ? (
+        <View style={styles.dragHandle}>
+          <Ionicons name="reorder-three-outline" size={20} color={colors.textMuted} />
+        </View>
+      ) : null}
     </Pressable>
   );
 }
@@ -53,9 +61,18 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       shadowRadius: 8,
       shadowOffset: { width: 0, height: 4 },
       elevation: 1,
+      gap: 10,
     },
     cardDone: {
       opacity: 0.55,
+    },
+    cardActive: {
+      borderWidth: 1,
+      borderColor: colors.accent,
+      shadowColor: colors.accent,
+      shadowOpacity: 0.08,
+      shadowRadius: 10,
+      shadowOffset: { width: 0, height: 4 },
     },
     checkbox: {
       width: 22,
@@ -84,6 +101,12 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       marginTop: 4,
       color: colors.textSecondary,
       fontSize: 13,
+    },
+    dragHandle: {
+      width: 24,
+      alignItems: "center",
+      justifyContent: "center",
+      opacity: 0.8,
     },
   });
 }

@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, SafeAreaView, StyleSheet, useWindowDimensions, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  useWindowDimensions,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Feather } from "@expo/vector-icons";
@@ -30,12 +40,15 @@ import { PlannerTaskBoard } from "../../src/components/planner/PlannerTaskBoard"
 import { PlannerWeekCalendarGrid } from "../../src/components/planner/PlannerWeekCalendarGrid";
 import { PlannerDailySchedulePanel, PlannerDailyTaskPanel } from "../../src/components/planner/PlannerDailyPanels";
 import {
-  PlannerAppSettingsModal,
+  PlannerSettingsModal,
   PlannerCreateListModal,
   PlannerDeleteListModal,
   PlannerTaskDetailModal,
 } from "../../src/components/planner/PlannerModals";
+import { useIsFocused } from "@react-navigation/native";
 import { DAY_COLUMN_WIDTH, HOUR_BLOCK_HEIGHT } from "../../src/components/planner/time";
+import type { PlannerListHoverTarget } from "../../src/components/planner/drag/dropTargets";
+import type { PlannerDragPreview } from "../../src/components/planner/types";
 
 function formatDateKey(date: Date) {
   return date.toISOString().split("T")[0];
@@ -46,10 +59,21 @@ function formatRangeLabel(start?: PlannerDay, end?: PlannerDay) {
   return `${start.monthText} ${start.dayNumber} – ${end.monthText} ${end.dayNumber}`;
 }
 
-function buildPlannerDays(offset: number, count: number): PlannerDay[] {
+function startOfWeek(date: Date, weekStart: "sunday" | "monday") {
+  const startDay = weekStart === "sunday" ? 0 : 1;
+  const current = date.getDay();
+  const diff = (current - startDay + 7) % 7;
+  const start = new Date(date);
+  start.setDate(date.getDate() - diff);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function buildPlannerDays(offset: number, count: number, weekStart?: "sunday" | "monday"): PlannerDay[] {
   const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const start = new Date(today);
+  const base = weekStart ? startOfWeek(today, weekStart) : today;
+  base.setHours(0, 0, 0, 0);
+  const start = new Date(base);
   start.setDate(start.getDate() + offset * count);
   return Array.from({ length: count }, (_, index) => {
     const date = new Date(start);
@@ -100,6 +124,7 @@ function rowToLocalTask(row: TaskWindowRow): LocalTask {
 }
 
 export default function ListsScreen() {
+  const isFocused = useIsFocused();
   const router = useRouter();
   const queryClient = useQueryClient();
   const { session } = useAuth();
@@ -108,6 +133,7 @@ export default function ListsScreen() {
   const { width, height } = useWindowDimensions();
   const isDesktop = width >= 1280;
   const daysPerView = isDesktop ? 7 : 3;
+  const [calendarStart, setCalendarStart] = useState<"sunday" | "monday">("monday");
 
   const { data: lists, isLoading: listsLoading, upsertList } = useLists();
   const { activeListId, setActiveListId } = useListsDrawer();
@@ -117,7 +143,10 @@ export default function ListsScreen() {
   const [creatingList, setCreatingList] = useState(false);
   const [viewMode, setViewMode] = useState<PlannerViewMode>("tasks");
   const [plannerOffset, setPlannerOffset] = useState(0);
-  const plannerDays = useMemo(() => buildPlannerDays(plannerOffset, daysPerView), [plannerOffset, daysPerView]);
+  const plannerDays = useMemo(
+    () => buildPlannerDays(plannerOffset, daysPerView, viewMode === "calendar" ? calendarStart : undefined),
+    [plannerOffset, daysPerView, calendarStart, viewMode],
+  );
   const calendarRangeLabel = useMemo(
     () => formatRangeLabel(plannerDays[0], plannerDays[plannerDays.length - 1]),
     [plannerDays],
@@ -137,6 +166,78 @@ export default function ListsScreen() {
   const [selectedDayKey, setSelectedDayKey] = useState(currentStartKey);
   const [railDayKey, setRailDayKey] = useState(currentStartKey);
   const [pendingTask, setPendingTask] = useState<LocalTask | null>(null);
+  const [backlogDayHoverKey, setBacklogDayHoverKey] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<PlannerDragPreview | null>(null);
+  const [calendarPreview, setCalendarPreview] = useState<{ task: LocalTask; dayKey: string; startMinutes: number } | null>(null);
+  const [backlogHoverOverride, setBacklogHoverOverride] = useState<PlannerListHoverTarget | null>(null);
+
+  const orderedLists = useMemo(() => {
+    if (!lists) return [];
+    const inbox = lists.find((list) => (list.name ?? "").toLowerCase() === "inbox");
+    const rest = lists.filter((list) => list.id !== inbox?.id);
+    return inbox ? [inbox, ...rest] : rest;
+  }, [lists]);
+  const inboxList = orderedLists[0];
+  const backlogListIds = useMemo(() => orderedLists.map((list) => list.id), [orderedLists]);
+  const backlogQuery = useQuery({
+    queryKey: ["backlog", backlogListIds.join("|")],
+    queryFn: () => fetchListBacklog(backlogListIds.length ? backlogListIds : undefined),
+    enabled: backlogListIds.length > 0,
+  });
+  const backlogByList = useMemo(() => {
+    const bucket: Record<string, LocalTask[]> = {};
+    orderedLists.forEach((list) => {
+      bucket[list.id] = [];
+    });
+    const fallbackListId = orderedLists[0]?.id ?? null;
+    (backlogQuery.data ?? []).forEach((task) => {
+      const targetListId = task.list_id ?? fallbackListId;
+      if (!targetListId) return;
+      bucket[targetListId] = bucket[targetListId] ?? [];
+      bucket[targetListId].push(task);
+    });
+    return bucket;
+  }, [orderedLists, backlogQuery.data]);
+
+  const handleDropPendingIntoDay = useCallback(
+    async (dayKey: string) => {
+    if (!pendingTask) return;
+      await queueTaskMutation({
+        ...pendingTask,
+        list_id: pendingTask.list_id ?? null,
+        due_date: dayKey,
+        planned_start: null,
+        planned_end: null,
+        updated_at: new Date().toISOString(),
+      });
+      setPendingTask(null);
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    [pendingTask, queryClient],
+  );
+
+  const handleDropPendingIntoSlot = useCallback(
+    async (dayKey: string, hour: number) => {
+      if (!pendingTask) return;
+      const start = new Date(`${dayKey}T${hour.toString().padStart(2, "0")}:00:00`);
+      const end = new Date(start);
+      end.setHours(end.getHours() + 1);
+      await queueTaskMutation({
+        ...pendingTask,
+        list_id: pendingTask.list_id ?? null,
+        due_date: dayKey,
+        planned_start: start.toISOString(),
+        planned_end: end.toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      setPendingTask(null);
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    [pendingTask, queryClient],
+  );
+
   const [showBacklog, setShowBacklog] = useState(true);
   const [showTimebox, setShowTimebox] = useState(isDesktop);
   const [taskDetailId, setTaskDetailId] = useState<string | null>(null);
@@ -180,20 +281,18 @@ export default function ListsScreen() {
     setShowTimebox(isDesktop);
   }, [isDesktop]);
 
-  const orderedLists = useMemo(() => {
-    if (!lists) return [];
-    const inbox = lists.find((list) => (list.name ?? "").toLowerCase() === "inbox");
-    const rest = lists.filter((list) => list.id !== inbox?.id);
-    return inbox ? [inbox, ...rest] : rest;
-  }, [lists]);
-
-  const inboxList = orderedLists[0];
 
   useEffect(() => {
-    if (!activeListId && inboxList) {
-      setActiveListId(inboxList.id);
+    setDragPreview(null);
+  }, [viewMode]);
+
+  const inboxListId = inboxList?.id ?? null;
+
+  useEffect(() => {
+    if (!activeListId && inboxListId) {
+      setActiveListId(inboxListId);
     }
-  }, [activeListId, inboxList, setActiveListId]);
+  }, [activeListId, inboxListId, setActiveListId]);
 
   useEffect(() => {
     if (!plannerDays.find((day) => day.key === selectedDayKey)) {
@@ -211,27 +310,6 @@ export default function ListsScreen() {
       setRailDayKey(selectedDayKey);
     }
   }, [plannerDays, railDayKey, selectedDayKey, currentStartKey, viewMode]);
-
-  const backlogQuery = useQuery({
-    queryKey: ["backlog", activeListId],
-    queryFn: () => fetchListBacklog(activeListId ? [activeListId] : orderedLists.map((list) => list.id)),
-    enabled: Boolean(inboxList),
-  });
-
-  const backlogByList = useMemo(() => {
-    const bucket: Record<string, LocalTask[]> = {};
-    orderedLists.forEach((list) => {
-      bucket[list.id] = [];
-    });
-    const fallbackListId = orderedLists[0]?.id ?? null;
-    (backlogQuery.data ?? []).forEach((task) => {
-      const targetListId = task.list_id ?? fallbackListId;
-      if (!targetListId) return;
-      bucket[targetListId] = bucket[targetListId] ?? [];
-      bucket[targetListId].push(task);
-    });
-    return bucket;
-  }, [orderedLists, backlogQuery.data]);
 
   const scheduledByDay = useMemo(() => {
     const bucket: Record<string, LocalTask[]> = {};
@@ -451,11 +529,81 @@ export default function ListsScreen() {
     queryClient.invalidateQueries({ queryKey: ["backlog"] });
   }
 
+  const handleMoveBacklogTask = useCallback(
+    async (task: LocalTask, listId: string) => {
+      if (task.list_id === listId) return;
+      await queueTaskMutation({
+        ...task,
+        list_id: listId,
+        due_date: null,
+        planned_start: null,
+        planned_end: null,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+    },
+    [queryClient],
+  );
+
+  const handleReorderBacklogTaskDirect = useCallback(
+    async (task: LocalTask, listId: string, targetTaskId: string | null, position: "before" | "after") => {
+      const listTasks = (backlogByList[listId] ?? []).filter((candidate) => candidate.id !== task.id);
+      const nextSortIndex = computeBacklogSortIndex(listTasks, targetTaskId, position);
+      await queueTaskMutation({
+        ...task,
+        list_id: listId,
+        due_date: null,
+        planned_start: null,
+        planned_end: null,
+        sort_index: nextSortIndex,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+    },
+    [backlogByList, queryClient],
+  );
+
+  const handleAssignBacklogTaskToDay = useCallback(
+    async (task: LocalTask, dayKey: string) => {
+      await queueTaskMutation({
+        ...task,
+        list_id: task.list_id ?? null,
+        due_date: dayKey,
+        planned_start: null,
+        planned_end: null,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    },
+    [queryClient],
+  );
+
+  const handleAssignBacklogTaskToSlot = useCallback(
+    async (task: LocalTask, dayKey: string, hour: number) => {
+      const start = new Date(`${dayKey}T${hour.toString().padStart(2, "0")}:00:00`);
+      const end = new Date(start);
+      end.setHours(end.getHours() + 1);
+      await queueTaskMutation({
+        ...task,
+        list_id: task.list_id ?? null,
+        due_date: dayKey,
+        planned_start: start.toISOString(),
+        planned_end: end.toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task", task.id] });
+    },
+    [queryClient],
+  );
+
   async function handleAddScheduledTask(dayKey: string, title: string) {
     if (!title.trim()) return;
     const newTask: LocalTask = {
       id: generateUUID(),
-      list_id: null,
+      list_id: activeListId ?? null,
       title: title.trim(),
       status: "todo",
       due_date: dayKey,
@@ -477,38 +625,82 @@ export default function ListsScreen() {
     setViewMode("calendar");
   }
 
-  async function handleDropPendingIntoDay(dayKey: string) {
-    if (!pendingTask) return;
+  const handleBacklogListHoverChange = useCallback((target: PlannerListHoverTarget | null) => {
+    setBacklogHoverOverride(target);
+  }, []);
+
+  const handleBacklogDayHoverChange = useCallback((dayKey: string | null) => {
+    setBacklogDayHoverKey(dayKey);
+  }, []);
+
+  async function handleResizeTaskTime(task: LocalTask, dayKey: string, startMinutes: number, endMinutes: number) {
+    const startDate = new Date(`${dayKey}T00:00:00`);
+    startDate.setMinutes(startMinutes);
+    const endDate = new Date(`${dayKey}T00:00:00`);
+    endDate.setMinutes(endMinutes);
     await queueTaskMutation({
-      ...pendingTask,
-      list_id: null,
+      ...task,
       due_date: dayKey,
-      planned_start: null,
-      planned_end: null,
+      planned_start: startDate.toISOString(),
+      planned_end: endDate.toISOString(),
       updated_at: new Date().toISOString(),
     });
-    setPendingTask(null);
-    queryClient.invalidateQueries({ queryKey: ["backlog"] });
     queryClient.invalidateQueries({ queryKey: ["tasks"] });
   }
 
-  async function handleDropPendingIntoSlot(dayKey: string, hour: number) {
-    if (!pendingTask) return;
-    const start = new Date(`${dayKey}T${hour.toString().padStart(2, "0")}:00:00`);
-    const end = new Date(start);
-    end.setHours(end.getHours() + 1);
-    await queueTaskMutation({
-      ...pendingTask,
-      list_id: null,
-      due_date: dayKey,
-      planned_start: start.toISOString(),
-      planned_end: end.toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-    setPendingTask(null);
-    queryClient.invalidateQueries({ queryKey: ["backlog"] });
-    queryClient.invalidateQueries({ queryKey: ["tasks"] });
-  }
+  const handleMoveScheduledTaskToDay = useCallback(
+    async (task: LocalTask, dayKey: string, startMinutes?: number, endMinutes?: number) => {
+      let plannedStart: string | null = task.planned_start;
+      let plannedEnd: string | null = task.planned_end;
+      if (typeof startMinutes === "number") {
+        const startDate = new Date(`${dayKey}T00:00:00`);
+        startDate.setMinutes(startMinutes);
+        plannedStart = startDate.toISOString();
+      } else {
+        plannedStart = null;
+      }
+      if (typeof endMinutes === "number") {
+        const endDate = new Date(`${dayKey}T00:00:00`);
+        endDate.setMinutes(endMinutes);
+        plannedEnd = endDate.toISOString();
+      } else {
+        plannedEnd = plannedStart ? plannedStart : null;
+      }
+      await queueTaskMutation({
+        ...task,
+        list_id: task.list_id ?? null,
+        due_date: dayKey,
+        planned_start: plannedStart,
+        planned_end: plannedEnd,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["task", task.id] });
+    },
+    [queryClient],
+  );
+
+  const handleMoveScheduledTaskToBacklog = useCallback(
+    async (task: LocalTask, listId: string, targetTaskId?: string | null, position?: "before" | "after") => {
+      const listTasks = (backlogByList[listId] ?? []).filter((candidate) => candidate.id !== task.id);
+      const effectivePosition = targetTaskId ? position ?? "after" : "after";
+      const nextSortIndex = computeBacklogSortIndex(listTasks, targetTaskId ?? null, effectivePosition);
+      await queueTaskMutation({
+        ...task,
+        list_id: listId,
+        due_date: null,
+        planned_start: null,
+        planned_end: null,
+        sort_index: nextSortIndex,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["task", task.id] });
+    },
+    [backlogByList, queryClient],
+  );
 
   function handleOpenTaskDetail(task: LocalTask) {
     setTaskDetailId(task.id);
@@ -519,6 +711,14 @@ export default function ListsScreen() {
       <SafeAreaView style={styles.loadingScreen}>
         <ActivityIndicator size="large" color={colors.accentMuted} />
       </SafeAreaView>
+    );
+  }
+
+  if (!isFocused) {
+    return (
+      <PlannerStylesContext.Provider value={styles}>
+        <SafeAreaView style={styles.safe} />
+      </PlannerStylesContext.Provider>
     );
   }
 
@@ -537,10 +737,18 @@ export default function ListsScreen() {
           onToggleTask={handleToggleBacklogTask}
           onBeginSchedule={handleBeginSchedule}
           onCreateList={() => setCreateModalOpen(true)}
-              onOpenTask={handleOpenTaskDetail}
-              onDeleteList={handleRequestDeleteList}
-              undeletableListId={inboxList?.id ?? null}
-            />
+          onOpenTask={handleOpenTaskDetail}
+          onDeleteList={handleRequestDeleteList}
+          undeletableListId={inboxList?.id ?? null}
+          onMoveTask={handleMoveBacklogTask}
+          onReorderTask={handleReorderBacklogTaskDirect}
+          onDragPreviewChange={setDragPreview}
+          onAssignTaskToDay={handleAssignBacklogTaskToDay}
+          onAssignTaskToSlot={handleAssignBacklogTaskToSlot}
+          onCalendarPreviewChange={setCalendarPreview}
+          onDayHoverChange={handleBacklogDayHoverChange}
+          externalHoverTarget={backlogHoverOverride}
+        />
           ) : null}
           <View style={styles.centerPane}>
             <View style={styles.heroShell}>
@@ -584,6 +792,13 @@ export default function ListsScreen() {
                 onSelectDay={(dayKey) => setSelectedDayKey(dayKey)}
                 selectedDayKey={resolvedSelectedDayKey}
                 gridHeight={calendarGridHeight}
+                onResizeTask={handleResizeTaskTime}
+                onDragPreviewChange={setDragPreview}
+                onDayHoverChange={handleBacklogDayHoverChange}
+                onListHoverChange={handleBacklogListHoverChange}
+                onDropTaskOnDay={handleMoveScheduledTaskToDay}
+                onDropTaskOnList={handleMoveScheduledTaskToBacklog}
+                externalPreview={calendarPreview}
               />
             ) : (
               <PlannerTaskBoard
@@ -600,6 +815,13 @@ export default function ListsScreen() {
                 onReachFuture={() => extendTaskDays("future")}
                 listRef={taskBoardRef}
                 onVisibleRangeChange={handleTaskBoardVisibleRangeChange}
+                dropHoverDayKey={backlogDayHoverKey}
+                onDragPreviewChange={setDragPreview}
+                onDayHoverChange={handleBacklogDayHoverChange}
+                onListHoverChange={handleBacklogListHoverChange}
+                onCalendarPreviewChange={setCalendarPreview}
+                onDropTaskOnDay={handleMoveScheduledTaskToDay}
+                onDropTaskOnList={handleMoveScheduledTaskToBacklog}
               />
             )}
           </View>
@@ -615,19 +837,33 @@ export default function ListsScreen() {
                 onToday={handleResetToToday}
                 disablePrev={!selectedCanPrev}
                 disableNext={!selectedCanNext}
+                dropHover={Boolean(selectedDay && backlogDayHoverKey === selectedDay.key)}
+                onDragPreviewChange={setDragPreview}
+                onCalendarPreviewChange={setCalendarPreview}
+                onListHoverChange={handleBacklogListHoverChange}
+                onDayHoverChange={handleBacklogDayHoverChange}
+                onDropTaskOnList={handleMoveScheduledTaskToBacklog}
+                onDropTaskOnDay={handleMoveScheduledTaskToDay}
               />
             ) : (
               <PlannerDailySchedulePanel
                 day={railDay}
                 tasks={railDayTasks}
-                pendingTask={pendingTask}
-                onDropPendingIntoSlot={handleDropPendingIntoSlot}
-                onOpenTask={handleOpenTaskDetail}
-                onToggleTask={handleToggleScheduledTask}
-                onStepDay={stepRailDay}
-                disablePrev={!railCanPrev}
+              pendingTask={pendingTask}
+              onDropPendingIntoSlot={handleDropPendingIntoSlot}
+              onOpenTask={handleOpenTaskDetail}
+              onToggleTask={handleToggleScheduledTask}
+              onResizeTask={handleResizeTaskTime}
+              onStepDay={stepRailDay}
+              disablePrev={!railCanPrev}
                 disableNext={!railCanNext}
                 onToday={handleResetToToday}
+                externalPreview={calendarPreview}
+                onDragPreviewChange={setDragPreview}
+                onDayHoverChange={handleBacklogDayHoverChange}
+                onListHoverChange={handleBacklogListHoverChange}
+                onDropTaskOnDay={handleMoveScheduledTaskToDay}
+                onDropTaskOnList={handleMoveScheduledTaskToBacklog}
               />
             )
           ) : null}
@@ -644,14 +880,12 @@ export default function ListsScreen() {
           onSubmit={() => handleCreateList(newListName)}
           loading={creatingList}
         />
-        <PlannerAppSettingsModal
+        <PlannerSettingsModal
           visible={settingsModalOpen}
           onClose={() => setSettingsModalOpen(false)}
           userEmail={userEmail}
-          onOpenFullSettings={() => {
-            setSettingsModalOpen(false);
-            router.push("/settings/personalization");
-          }}
+          calendarStart={calendarStart}
+          onChangeCalendarStart={setCalendarStart}
         />
         <PlannerDeleteListModal
           visible={Boolean(deleteTarget)}
@@ -663,14 +897,51 @@ export default function ListsScreen() {
           lists={orderedLists}
           onClose={handleCloseDeleteModal}
           onConfirm={handleConfirmDeleteList}
-        />
-        <PlannerTaskDetailModal taskId={taskDetailId} onClose={() => setTaskDetailId(null)} />
+      />
+      <PlannerTaskDetailModal taskId={taskDetailId} onClose={() => setTaskDetailId(null)} />
+      {Platform.OS === "web" && dragPreview ? (
+        dragPreview.variant === "calendar" ? null : dragPreview.variant === "taskBoard" ? (
+          <View
+            pointerEvents="none"
+            style={[
+              styles.dragPreviewBoardWrapper,
+              { top: dragPreview.y - 48, left: dragPreview.x - DAY_COLUMN_WIDTH / 2 },
+            ]}
+          >
+            <View style={styles.dragPreviewBoardCard}>
+              <Text style={styles.dragPreviewBoardTitle} numberOfLines={3}>
+                {dragPreview.task.title}
+              </Text>
+            </View>
+          </View>
+        ) : (
+          <View
+            pointerEvents="none"
+            style={[styles.dragPreview, { top: dragPreview.y - 36, left: dragPreview.x - 110 }]}
+          >
+            <View style={styles.dragPreviewCard}>
+              <View style={styles.dragPreviewRow}>
+                <View style={styles.dragPreviewCheckbox} />
+                <View style={styles.dragPreviewContent}>
+                  <Text style={styles.dragPreviewTitle} numberOfLines={2}>
+                    {dragPreview.task.title}
+                  </Text>
+                  <Text style={styles.dragPreviewSubtitle} numberOfLines={1}>
+                    {orderedLists.find((list) => list.id === dragPreview.task.list_id)?.name ?? "Inbox"}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        )
+      ) : null}
       </SafeAreaView>
     </PlannerStylesContext.Provider>
   );
 }
 
 function createStyles(colors: ThemeColors) {
+  const resizeCursorStyle = Platform.OS === "web" ? ({ cursor: "ns-resize" } as const) : {};
   return StyleSheet.create({
   safe: {
     flex: 1,
@@ -724,6 +995,11 @@ function createStyles(colors: ThemeColors) {
   drawerListItemActive: {
     backgroundColor: colors.border,
   },
+  drawerListItemDropTarget: {
+    borderWidth: 1,
+    borderColor: colors.accent,
+    backgroundColor: colors.surfaceAlt,
+  },
   drawerListLabel: {
     color: colors.textMuted,
     fontWeight: "500",
@@ -762,6 +1038,19 @@ function createStyles(colors: ThemeColors) {
   },
   listBlock: {
     marginBottom: 24,
+    padding: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+  },
+  listBlockHover: {
+    borderColor: colors.accent,
+    backgroundColor: colors.surfaceAlt,
+    shadowColor: colors.accent,
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
   },
   listBlockHeader: {
     flexDirection: "row",
@@ -784,13 +1073,110 @@ function createStyles(colors: ThemeColors) {
     fontSize: 12,
   },
   listTasksContainer: {
-    gap: 8,
+    gap: 6,
+  },
+  listTaskWrapper: {
+    gap: 4,
+  },
+  listTaskWrapperInner: {
+    borderRadius: 12,
+  },
+  listTaskHover: {
+    borderRadius: 12,
+    shadowColor: colors.accent,
+    shadowOpacity: 0.18,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+  },
+  dropIndicator: {
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: colors.accent,
+    marginHorizontal: 8,
+    marginBottom: 4,
+    opacity: 0.9,
   },
   centerPane: {
     flex: 1,
     backgroundColor: colors.panelBackground,
     paddingHorizontal: 24,
     paddingVertical: 24,
+  },
+  dragPreview: {
+    position: "absolute",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: "transparent",
+  },
+  dragPreviewCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    shadowColor: "rgba(0,0,0,0.2)",
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+    opacity: 0.92,
+  },
+  dragPreviewRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    gap: 12,
+    minWidth: 220,
+    maxWidth: 320,
+  },
+  dragPreviewCheckbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 2,
+    borderColor: colors.borderMuted,
+  },
+  dragPreviewContent: {
+    flex: 1,
+    gap: 2,
+  },
+  dragPreviewTitle: {
+    color: colors.text,
+    fontWeight: "600",
+  },
+  dragPreviewSubtitle: {
+    color: colors.textSecondary,
+    fontSize: 12,
+  },
+  dragPreviewCalendarWrapper: {
+    position: "absolute",
+    width: DAY_COLUMN_WIDTH,
+    paddingHorizontal: 12,
+  },
+  dragPreviewCalendarBlock: {
+    minHeight: 56,
+  },
+  dragPreviewBoardWrapper: {
+    position: "absolute",
+    width: DAY_COLUMN_WIDTH,
+    paddingHorizontal: 12,
+  },
+  dragPreviewBoardCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: colors.border,
+    shadowColor: "rgba(15,23,42,0.2)",
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+  },
+  dragPreviewBoardTitle: {
+    color: colors.text,
+    fontWeight: "600",
   },
   heroBar: {
     flexDirection: "row",
@@ -899,6 +1285,15 @@ function createStyles(colors: ThemeColors) {
   taskColumnSelected: {
     borderWidth: 1,
     borderColor: colors.borderMuted,
+  },
+  taskColumnDropTarget: {
+    borderWidth: 2,
+    borderColor: colors.accent,
+    backgroundColor: colors.surface,
+    shadowColor: colors.accent,
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
   },
   taskColumnHeader: {
     marginBottom: 12,
@@ -1018,9 +1413,13 @@ function createStyles(colors: ThemeColors) {
     borderRadius: 12,
     padding: 8,
     backgroundColor: colors.surfaceAlt,
+    position: "relative",
+  },
+  calendarBlockContent: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 8,
   },
   calendarBlockFloating: {
     position: "absolute",
@@ -1040,12 +1439,41 @@ function createStyles(colors: ThemeColors) {
     marginRight: 8,
     fontSize: 12,
   },
+  calendarBlockDragging: {
+    opacity: 1,
+    borderWidth: 2,
+    borderColor: colors.accent,
+    shadowOpacity: 0.5,
+    shadowColor: colors.accent,
+  },
+  calendarResizeHandle: {
+    position: "absolute",
+    left: -6,
+    right: -6,
+    height: 12,
+    zIndex: 2,
+    ...resizeCursorStyle,
+  },
+  calendarResizeHandleTop: {
+    top: -6,
+  },
+  calendarResizeHandleBottom: {
+    bottom: -6,
+  },
   timeboxPanel: {
     width: 320,
     padding: 20,
     backgroundColor: colors.surface,
     borderLeftWidth: 1,
     borderColor: colors.border,
+  },
+  timeboxPanelDropTarget: {
+    borderColor: colors.accent,
+    shadowColor: colors.accent,
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 6 },
+    backgroundColor: colors.surfaceAlt,
   },
   panelHeader: {
     flexDirection: "row",
@@ -1138,16 +1566,29 @@ function createStyles(colors: ThemeColors) {
   },
   settingsModalCard: {
     width: "100%",
-    maxWidth: 520,
+    maxWidth: 980,
     backgroundColor: colors.surface,
     borderRadius: 24,
-    padding: 24,
-    gap: 16,
+    padding: 0,
+    overflow: "hidden",
+  },
+  settingsModalShell: {
+    flexDirection: "row",
+    minHeight: 520,
   },
   settingsHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    gap: 12,
+    paddingBottom: 20,
+  },
+  settingsSidebar: {
+    width: 280,
+    padding: 24,
+    backgroundColor: colors.sidebarBackground,
+    borderRightWidth: 1,
+    borderColor: colors.divider,
     gap: 12,
   },
   settingsHeaderInfo: {
@@ -1178,11 +1619,13 @@ function createStyles(colors: ThemeColors) {
     fontSize: 12,
   },
   settingsSignOutButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 999,
+    marginTop: "auto",
+    paddingVertical: 12,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.danger,
+    alignItems: "center",
+    justifyContent: "center",
   },
   settingsSignOutButtonDisabled: {
     opacity: 0.7,
@@ -1191,40 +1634,94 @@ function createStyles(colors: ThemeColors) {
     color: colors.danger,
     fontWeight: "600",
   },
-  settingsModalScroll: {
-    maxHeight: 420,
+  settingsMenu: {
+    gap: 6,
   },
-  settingsModalScrollContent: {
-    gap: 20,
+  settingsMenuItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
   },
-  settingsSection: {
-    gap: 12,
+  settingsMenuItemActive: {
+    backgroundColor: colors.primary,
   },
-  settingsSectionTitle: {
-    color: colors.text,
+  settingsMenuItemText: {
+    color: colors.textSecondary,
     fontWeight: "600",
   },
-  settingsToggleRow: {
+  settingsMenuItemTextActive: {
+    color: colors.primaryText,
+  },
+  settingsContent: {
+    flex: 1,
+    padding: 28,
+    gap: 16,
+    backgroundColor: colors.panelBackground,
+  },
+  settingsPanelTitle: {
+    fontSize: 26,
+    fontWeight: "700",
+    color: colors.text,
+    marginBottom: 12,
+  },
+  settingsModalScroll: {
+    flex: 1,
+  },
+  settingsModalScrollContent: {
+    gap: 12,
+  },
+  settingsCard: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 18,
+    padding: 18,
+    gap: 12,
+  },
+  settingsCardTitle: {
+    color: colors.text,
+    fontWeight: "700",
+    fontSize: 16,
+  },
+  settingsFormGroup: {
+    gap: 6,
+  },
+  settingsLabel: {
+    color: colors.textSecondary,
+    fontWeight: "600",
+  },
+  settingsRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingVertical: 4,
+    gap: 12,
   },
-  settingsToggleLabel: {
+  settingsRowDisabled: {
+    opacity: 0.6,
+  },
+  settingsSwitchRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  settingsSwitchLabel: {
+    flex: 1,
     color: colors.textSecondary,
-    fontSize: 14,
+    fontWeight: "600",
   },
-  modalTitle: {
-    color: colors.text,
-    fontSize: 20,
-    fontWeight: "700",
-  },
-  modalInput: {
+  settingsInput: {
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 12,
     padding: 12,
     color: colors.text,
+    backgroundColor: colors.inputBackground,
+  },
+  modalTitle: {
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: "700",
   },
   deleteListStatus: {
     flexDirection: "row",
@@ -1337,4 +1834,35 @@ function createStyles(colors: ThemeColors) {
     paddingBottom: 16,
   },
   });
+}
+
+function computeBacklogSortIndex(
+  listTasks: LocalTask[],
+  targetTaskId: string | null,
+  position: "before" | "after",
+) {
+  if (!listTasks.length) {
+    return 0;
+  }
+  const normalized = listTasks.map((task, index) => ({
+    ...task,
+    sort_index: task.sort_index ?? index + 1,
+  }));
+  if (!targetTaskId) {
+    return (normalized[normalized.length - 1]?.sort_index ?? normalized.length) + 1;
+  }
+  const targetIndex = normalized.findIndex((task) => task.id === targetTaskId);
+  if (targetIndex < 0) {
+    return (normalized[normalized.length - 1]?.sort_index ?? normalized.length) + 1;
+  }
+  if (position === "before") {
+    const beforeTask = normalized[targetIndex - 1];
+    const beforeIndex = beforeTask?.sort_index ?? normalized[targetIndex].sort_index - 1;
+    const currentIndex = normalized[targetIndex].sort_index;
+    return beforeTask ? (beforeIndex + currentIndex) / 2 : currentIndex - 1;
+  }
+  const afterTask = normalized[targetIndex + 1];
+  const currentIndex = normalized[targetIndex].sort_index;
+  const afterIndex = afterTask?.sort_index ?? currentIndex + 1;
+  return (currentIndex + afterIndex) / 2;
 }

@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { Provider as PaperProvider } from "react-native-paper";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { pushOutbox, subscribeToRealtime } from "../src/lib/sync";
 import { AuthProvider, useAuth } from "../src/contexts/AuthContext";
 import { ThemeProvider, useTheme } from "../src/contexts/ThemeContext";
@@ -32,6 +33,7 @@ function AppSyncBridge() {
 function Navigator() {
   const { session, loading } = useAuth();
   const { colors } = useTheme();
+  const isLoggedIn = Boolean(session);
 
   if (loading) {
     return (
@@ -41,40 +43,38 @@ function Navigator() {
     );
   }
 
-  if (!session) {
-    return (
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" options={{ headerShown: false }} />
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Protected guard={!isLoggedIn}>
+        <Stack.Screen name="index" />
         <Stack.Screen name="(auth)/sign-in" options={{ title: "Sign In" }} />
         <Stack.Screen name="(auth)/sign-up" options={{ title: "Create Account" }} />
-      </Stack>
-    );
-  }
+      </Stack.Protected>
 
-  return (
-    <Stack>
-      <Stack.Screen name="index" options={{ headerShown: false }} />
-      <Stack.Screen name="(drawer)" options={{ headerShown: false }} />
-      <Stack.Screen name="task/[id]" options={{ title: "Task", presentation: "modal" }} />
-      <Stack.Screen name="recurrence/new" options={{ title: "New Recurrence" }} />
-      <Stack.Screen name="recurrence/[id]" options={{ title: "Edit Recurrence" }} />
-      <Stack.Screen name="settings/personalization" options={{ headerShown: false }} />
+      <Stack.Protected guard={isLoggedIn}>
+        <Stack.Screen name="(drawer)" />
+        <Stack.Screen name="task/[id]" options={{ title: "Task", presentation: "modal" }} />
+        <Stack.Screen name="recurrence/new" options={{ title: "New Recurrence" }} />
+        <Stack.Screen name="recurrence/[id]" options={{ title: "Edit Recurrence" }} />
+      </Stack.Protected>
     </Stack>
   );
 }
 
 export default function RootLayout() {
   return (
-    <QueryProvider>
-      <AuthProvider>
-        <ThemeProvider>
-          <PaperProvider>
-            <AppSyncBridge />
-            <Navigator />
-          </PaperProvider>
-        </ThemeProvider>
-      </AuthProvider>
-    </QueryProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <QueryProvider>
+        <AuthProvider>
+          <ThemeProvider>
+            <PaperProvider>
+              <AppSyncBridge />
+              <Navigator />
+            </PaperProvider>
+          </ThemeProvider>
+        </AuthProvider>
+      </QueryProvider>
+    </GestureHandlerRootView>
   );
 }
 

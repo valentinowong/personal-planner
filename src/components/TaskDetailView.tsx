@@ -471,8 +471,6 @@ export function TaskDetailView({ taskId, scrollStyle, contentStyle }: Props) {
           <Text style={styles.scheduleActionText}>Clear schedule</Text>
         </Pressable>
       </View>
-      <Text style={styles.helperText}>Dates use YYYY-MM-DD. Times use 24-hour HH:MM.</Text>
-
       {activePicker ? (
         Platform.OS === "android" ? (
           <PlatformDateTimePicker
