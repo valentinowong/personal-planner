@@ -235,6 +235,37 @@ type PlannerDailySchedulePanelProps = {
   ) => void | Promise<void>;
 };
 
+type PositionedTask = {
+  id: string;
+  start: number;
+  end: number;
+  hidden?: boolean;
+};
+
+function computeOverlapLayout(tasks: PositionedTask[]): Record<string, { column: number; columns: number }> {
+  const sorted = [...tasks].filter((t) => !t.hidden).sort((a, b) => a.start - b.start || a.end - b.end);
+  const layout: Record<string, { column: number; columns: number }> = {};
+  const active: { id: string; end: number; column: number }[] = [];
+
+  sorted.forEach((task) => {
+    for (let i = active.length - 1; i >= 0; i--) {
+      if (active[i].end <= task.start) {
+        active.splice(i, 1);
+      }
+    }
+    const used = new Set(active.map((a) => a.column));
+    let column = 0;
+    while (used.has(column)) column += 1;
+    active.push({ id: task.id, end: task.end, column });
+    const currentCols = Math.max(column + 1, active.length);
+    active.forEach((item) => {
+      layout[item.id] = { column: item.column, columns: currentCols };
+    });
+  });
+
+  return layout;
+}
+
 export function PlannerDailySchedulePanel({
   day,
   tasks,
@@ -262,6 +293,7 @@ export function PlannerDailySchedulePanel({
   const hoverTargetRef = useRef<ReturnType<typeof resolvePlannerDropTarget> | null>(null);
   const scheduleColumnRef = useRef<View | null>(null);
   const scheduleBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [scheduleWidth, setScheduleWidth] = useState<number | null>(null);
 
   const beginResize = useCallback(
     (event: GestureResponderEvent, task: LocalTask, metrics: TaskMetrics, edge: ResizeEdge) => {
@@ -515,11 +547,26 @@ export function PlannerDailySchedulePanel({
               pointerEvents="box-none"
               dataSet={{ dragTarget: "calendarDay", dayKey: day.key }}
               collapsable={false}
+              onLayout={(e) => setScheduleWidth(e.nativeEvent.layout.width)}
             >
-              {scheduledTasks.map((task) => {
-                const metrics = getTaskTimeMetrics(task);
-                if (!metrics) return null;
-                const isResizing = resizeState?.task.id === task.id;
+              {(() => {
+                const taskPositions: PositionedTask[] = scheduledTasks.map((task) => {
+                  const metrics = getTaskTimeMetrics(task);
+                  if (!metrics) return { id: task.id, start: 0, end: 0, hidden: true };
+                  const isResizing = resizeState?.task.id === task.id;
+                  const startMinutes = isResizing ? resizeState.currentStart : metrics.startMinutes;
+                  const endMinutes = isResizing
+                    ? resizeState.currentEnd
+                    : metrics.startMinutes + metrics.durationMinutes;
+                  const dragActive = dragState?.task.id === task.id;
+                  const hidden = dragActive && dragExternal;
+                  return { id: task.id, start: startMinutes, end: endMinutes, hidden };
+                });
+                const layoutMap = computeOverlapLayout(taskPositions);
+                return scheduledTasks.map((task) => {
+                  const metrics = getTaskTimeMetrics(task);
+                  if (!metrics) return null;
+                  const isResizing = resizeState?.task.id === task.id;
                 const startMinutes = isResizing ? resizeState.currentStart : metrics.startMinutes;
                 const endMinutes = isResizing
                   ? resizeState.currentEnd
@@ -531,9 +578,15 @@ export function PlannerDailySchedulePanel({
                 const translateY = dragActive
                   ? ((dragState.currentStart - metrics.startMinutes) / 60) * HOUR_BLOCK_HEIGHT
                   : 0;
-                return (
-                  <DailyScheduleTask
-                    key={task.id}
+                const layout = layoutMap[task.id] ?? { column: 0, columns: 1 };
+                const gutter = 4;
+                const availableWidth = (scheduleWidth ?? 0) || 1;
+                const columnWidth = availableWidth / layout.columns;
+                const width = Math.max(40, columnWidth - gutter);
+                const left = layout.column * columnWidth + gutter / 2;
+                  return (
+                    <DailyScheduleTask
+                      key={task.id}
                     task={task}
                     metrics={metrics}
                     top={top}
@@ -549,12 +602,15 @@ export function PlannerDailySchedulePanel({
                     beginDrag={beginDrag}
                     handleDragMove={handleDragMove}
                     finishDrag={finishDrag}
-                    beginResize={beginResize}
-                    handleResizeMove={handleResizeMove}
-                    finishResize={finishResize}
-                  />
-                );
-              })}
+                      beginResize={beginResize}
+                      handleResizeMove={handleResizeMove}
+                      finishResize={finishResize}
+                      width={width}
+                      left={left}
+                    />
+                  );
+                });
+              })()}
             </View>
           </View>
         </View>
@@ -613,6 +669,8 @@ type DailyScheduleTaskProps = {
   metrics: TaskMetrics;
   top: number;
   height: number;
+  width: number;
+  left: number;
   translateY: number;
   dragActive: boolean;
   isResizing: boolean;
@@ -639,6 +697,8 @@ function DailyScheduleTask({
   metrics,
   top,
   height,
+  width,
+  left,
   translateY,
   dragActive,
   isResizing,
@@ -703,7 +763,7 @@ function DailyScheduleTask({
           styles.calendarBlock,
           styles.calendarBlockFloating,
           dragActive && styles.calendarBlockDragging,
-          { top, height, transform: [{ translateY }] },
+          { top, height, width, left, transform: [{ translateY }] },
           hidden && { opacity: 0 },
         ]}
         pointerEvents={hidden ? "none" : "auto"}

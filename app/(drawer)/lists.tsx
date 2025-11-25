@@ -1468,8 +1468,6 @@ function createStyles(colors: ThemeColors) {
   },
   calendarBlockFloating: {
     position: "absolute",
-    left: 0,
-    right: 0,
     paddingHorizontal: 12,
     paddingVertical: 10,
     shadowColor: "rgba(0,0,0,0.15)",

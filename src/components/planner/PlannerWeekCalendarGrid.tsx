@@ -11,6 +11,43 @@ import { getTaskTimeMetrics } from "./taskTime";
 import { resolvePlannerDropTarget, type PlannerDropTarget, type PlannerListHoverTarget } from "./drag/dropTargets";
 import type { PlannerDragPreview } from "./types";
 
+type PositionedTask = {
+  id: string;
+  start: number;
+  end: number;
+  hidden?: boolean;
+};
+
+function computeOverlapLayout(tasks: PositionedTask[]): Record<string, { column: number; columns: number }> {
+  const sorted = [...tasks].filter((t) => !t.hidden).sort((a, b) => a.start - b.start || a.end - b.end);
+  const layout: Record<string, { column: number; columns: number }> = {};
+  const active: { id: string; end: number; column: number }[] = [];
+
+  sorted.forEach((task) => {
+    // Drop finished tasks
+    for (let i = active.length - 1; i >= 0; i--) {
+      if (active[i].end <= task.start) {
+        active.splice(i, 1);
+      }
+    }
+
+    // Find smallest free column
+    const used = new Set(active.map((a) => a.column));
+    let column = 0;
+    while (used.has(column)) column += 1;
+
+    active.push({ id: task.id, end: task.end, column });
+
+    const currentCols = Math.max(column + 1, active.length);
+    // Every active task in this window should share the same column count
+    active.forEach((item) => {
+      layout[item.id] = { column: item.column, columns: currentCols };
+    });
+  });
+
+  return layout;
+}
+
 type AssignToDayFn = (task: LocalTask, dayKey: string, startMinutes?: number, endMinutes?: number) => void | Promise<void>;
 
 type PlannerWeekCalendarGridProps = {
@@ -399,12 +436,27 @@ export function PlannerWeekCalendarGrid({
                   dataSet={{ dragTarget: "calendarDay", dayKey: day.key }}
                   collapsable={false}
                 >
-                  {dayTasks.map((task) => {
-                    const metrics = getTaskTimeMetrics(task);
-                    if (!metrics) return null;
-                    const isDraggedTask = dragState?.task.id === task.id;
-                    const hidden = isDraggedTask && dragState.currentDayKey !== day.key;
-                    const isResizing =
+                  {(() => {
+                    const taskPositions: PositionedTask[] = dayTasks.map((task) => {
+                      const metrics = getTaskTimeMetrics(task);
+                      if (!metrics) return { id: task.id, start: 0, end: 0, hidden: true };
+                      const isDraggedTask = dragState?.task.id === task.id;
+                      const hidden = isDraggedTask && dragState.currentDayKey !== day.key;
+                      const isResizing =
+                        resizeState?.task.id === task.id && resizeState.dayKey === day.key && resizeState.edge !== undefined;
+                      const startMinutes = isResizing ? resizeState.currentStart : metrics.startMinutes;
+                      const endMinutes = isResizing
+                        ? resizeState.currentEnd
+                        : metrics.startMinutes + metrics.durationMinutes;
+                      return { id: task.id, start: startMinutes, end: endMinutes, hidden };
+                    });
+                    const layoutMap = computeOverlapLayout(taskPositions);
+                    return dayTasks.map((task) => {
+                      const metrics = getTaskTimeMetrics(task);
+                      if (!metrics) return null;
+                      const isDraggedTask = dragState?.task.id === task.id;
+                      const hidden = isDraggedTask && dragState.currentDayKey !== day.key;
+                      const isResizing =
                       resizeState?.task.id === task.id && resizeState.dayKey === day.key && resizeState.edge !== undefined;
                     const startMinutes = isResizing ? resizeState.currentStart : metrics.startMinutes;
                     const endMinutes = isResizing
@@ -422,11 +474,16 @@ export function PlannerWeekCalendarGrid({
                     const translateX = dragActive
                       ? (dragState.currentDayIndex - (dayIndexMap[day.key] ?? 0)) * CALENDAR_DAY_WIDTH
                       : 0;
-                    return (
-                      <CalendarGridTask
-                        key={task.id}
-                        task={task}
-                        dayKey={day.key}
+                    const layout = layoutMap[task.id] ?? { column: 0, columns: 1 };
+                    const gutter = 4;
+                    const columnWidth = CALENDAR_DAY_WIDTH / layout.columns;
+                    const width = Math.max(40, columnWidth - gutter);
+                    const left = layout.column * columnWidth + gutter / 2;
+                      return (
+                        <CalendarGridTask
+                          key={task.id}
+                          task={task}
+                          dayKey={day.key}
                         metrics={metrics}
                         top={top}
                         height={height}
@@ -443,12 +500,15 @@ export function PlannerWeekCalendarGrid({
                         beginResize={beginResize}
                         handleResizeMove={handleResizeMove}
                         finishResize={finishResize}
-                        isDragging={Boolean(dragState?.task.id === task.id && dragState.dragging)}
-                        isResizing={Boolean(resizingActive)}
-                        hidden={hidden}
-                      />
-                    );
-                  })}
+                          isDragging={Boolean(dragState?.task.id === task.id && dragState.dragging)}
+                          isResizing={Boolean(resizingActive)}
+                          hidden={hidden}
+                          width={width}
+                          left={left}
+                        />
+                      );
+                    });
+                  })()}
                 </View>
               </View>
             );
@@ -519,6 +579,8 @@ type CalendarGridTaskProps = {
   metrics: TaskMetrics;
   top: number;
   height: number;
+  width: number;
+  left: number;
   translateX: number;
   translateY: number;
   dragActive: boolean;
@@ -543,6 +605,8 @@ function CalendarGridTask({
   metrics,
   top,
   height,
+  width,
+  left,
   translateX,
   translateY,
   dragActive,
@@ -620,7 +684,7 @@ function CalendarGridTask({
           styles.calendarBlock,
           styles.calendarBlockFloating,
           dragActive && styles.calendarBlockDragging,
-          { top, height, transform: [{ translateX }, { translateY }] },
+          { top, height, width, left, transform: [{ translateX }, { translateY }] },
           hidden && { opacity: 0 },
         ]}
         pointerEvents={hidden ? "none" : "auto"}
