@@ -1,3 +1,7 @@
+import { Feather } from "@expo/vector-icons";
+import { useIsFocused } from "@react-navigation/native";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -10,45 +14,47 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Feather } from "@expo/vector-icons";
-import type { FlashList as FlashListType } from "@shopify/flash-list";
-import { useLists } from "../../src/hooks/useLists";
-import type { RemoteList } from "../../src/hooks/useLists";
+import type { PlannerListHoverTarget } from "../../src/components/planner/drag/dropTargets";
+import { PlannerBacklogPanel } from "../../src/components/planner/PlannerBacklogPanel";
+import { PlannerDailySchedulePanel, PlannerDailyTaskPanel } from "../../src/components/planner/PlannerDailyPanels";
+import { PlannerHero } from "../../src/components/planner/PlannerHero";
 import {
-  fetchListBacklog,
+  PlannerCreateListModal,
+  PlannerDeleteListModal,
+  PlannerSettingsModal,
+  PlannerTaskDetailModal,
+} from "../../src/components/planner/PlannerModals";
+import { PlannerStylesContext } from "../../src/components/planner/PlannerStylesContext";
+import { PlannerTaskBoard } from "../../src/components/planner/PlannerTaskBoard";
+import { PlannerWeekCalendarGrid } from "../../src/components/planner/PlannerWeekCalendarGrid";
+import { DAY_COLUMN_WIDTH, HOUR_BLOCK_HEIGHT } from "../../src/components/planner/time";
+import type { DeleteAction, PlannerDay, PlannerDragPreview, PlannerViewMode } from "../../src/components/planner/types";
+import { useAuth } from "../../src/contexts/AuthContext";
+import { useListsDrawer } from "../../src/contexts/ListsDrawerContext";
+import { useTheme } from "../../src/contexts/ThemeContext";
+import type { RemoteList } from "../../src/hooks/useLists";
+import { useLists } from "../../src/hooks/useLists";
+import { useTasks } from "../../src/hooks/useTasks";
+import type { LocalTask } from "../../src/lib/db";
+import { queueTaskDeletion, queueTaskMutation } from "../../src/lib/sync";
+import { generateUUID } from "../../src/lib/uuid";
+import { deleteList as deleteListRow } from "../../src/services/api/lists";
+import {
   countTasksInList,
   deleteTasksInList,
+  fetchListBacklog,
+  logTaskHistory,
+  fetchLatestHistory,
+  deleteHistoryEntry,
   moveTasksToList,
   type TaskWindowRow,
 } from "../../src/services/api/tasks";
-import { useTasks } from "../../src/hooks/useTasks";
-import { useListsDrawer } from "../../src/contexts/ListsDrawerContext";
-import { useAuth } from "../../src/contexts/AuthContext";
-import type { LocalTask } from "../../src/lib/db";
-import { queueTaskMutation, queueTaskDeletion } from "../../src/lib/sync";
-import { generateUUID } from "../../src/lib/uuid";
-import { useTheme } from "../../src/contexts/ThemeContext";
 import type { ThemeColors } from "../../src/theme";
-import { deleteList as deleteListRow } from "../../src/services/api/lists";
-import type { DeleteAction, PlannerDay, PlannerViewMode } from "../../src/components/planner/types";
-import { PlannerStylesContext } from "../../src/components/planner/PlannerStylesContext";
-import { PlannerBacklogPanel } from "../../src/components/planner/PlannerBacklogPanel";
-import { PlannerHero } from "../../src/components/planner/PlannerHero";
-import { PlannerTaskBoard } from "../../src/components/planner/PlannerTaskBoard";
-import { PlannerWeekCalendarGrid } from "../../src/components/planner/PlannerWeekCalendarGrid";
-import { PlannerDailySchedulePanel, PlannerDailyTaskPanel } from "../../src/components/planner/PlannerDailyPanels";
-import {
-  PlannerSettingsModal,
-  PlannerCreateListModal,
-  PlannerDeleteListModal,
-  PlannerTaskDetailModal,
-} from "../../src/components/planner/PlannerModals";
-import { useIsFocused } from "@react-navigation/native";
-import { DAY_COLUMN_WIDTH, HOUR_BLOCK_HEIGHT } from "../../src/components/planner/time";
-import type { PlannerListHoverTarget } from "../../src/components/planner/drag/dropTargets";
-import type { PlannerDragPreview } from "../../src/components/planner/types";
+
+type UndoAction =
+  | { kind: "update"; before: LocalTask; after: LocalTask; label: string; historyId?: string }
+  | { kind: "add"; after: LocalTask; label: string; historyId?: string }
+  | { kind: "delete"; before: LocalTask; label: string; historyId?: string };
 
 function formatDateKey(date: Date) {
   return date.toISOString().split("T")[0];
@@ -86,6 +92,22 @@ function buildPlannerDays(offset: number, count: number, weekStart?: "sunday" | 
       dateObj: date,
     };
   });
+}
+
+function cloneTask(task: LocalTask): LocalTask {
+  return { ...task };
+}
+
+function findTaskById(fromBacklog: Record<string, LocalTask[]>, fromScheduled: Record<string, LocalTask[]>, id: string): LocalTask | null {
+  for (const listId of Object.keys(fromBacklog)) {
+    const hit = fromBacklog[listId]?.find((t) => t.id === id);
+    if (hit) return hit;
+  }
+  for (const dayKey of Object.keys(fromScheduled)) {
+    const hit = fromScheduled[dayKey]?.find((t) => t.id === id);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 function buildPlannerDayRange(startOffset: number, endOffset: number): PlannerDay[] {
@@ -170,6 +192,29 @@ export default function ListsScreen() {
   const [dragPreview, setDragPreview] = useState<PlannerDragPreview | null>(null);
   const [calendarPreview, setCalendarPreview] = useState<{ task: LocalTask; dayKey: string; startMinutes: number } | null>(null);
   const [backlogHoverOverride, setBacklogHoverOverride] = useState<PlannerListHoverTarget | null>(null);
+  const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const [hasHistory, setHasHistory] = useState(false);
+  const recordHistory = useCallback(
+    async (
+      entry: { action: string; taskId: string; before?: Partial<LocalTask> | null; after?: Partial<LocalTask> | null },
+      options?: { clearRedo?: boolean },
+    ) => {
+      await logTaskHistory(entry);
+      setHasHistory(true);
+      if (options?.clearRedo !== false) {
+        setRedoStack([]);
+      }
+    },
+    [],
+  );
+
+  const pushUndo = useCallback((action: UndoAction) => {
+    setUndoStack((prev) => [...prev, action]);
+    setRedoStack([]);
+    setHasHistory(true);
+  }, []);
 
   const orderedLists = useMemo(() => {
     if (!lists) return [];
@@ -202,19 +247,23 @@ export default function ListsScreen() {
   const handleDropPendingIntoDay = useCallback(
     async (dayKey: string) => {
     if (!pendingTask) return;
-      await queueTaskMutation({
+      const before = cloneTask(pendingTask);
+      const after = {
         ...pendingTask,
         list_id: pendingTask.list_id ?? null,
         due_date: dayKey,
         planned_start: null,
         planned_end: null,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      await queueTaskMutation(after);
       setPendingTask(null);
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      recordHistory({ action: "schedule_day", taskId: after.id, before, after });
     },
-    [pendingTask, queryClient],
+    [pendingTask, queryClient, pushUndo, recordHistory],
   );
 
   const handleDropPendingIntoSlot = useCallback(
@@ -223,19 +272,23 @@ export default function ListsScreen() {
       const start = new Date(`${dayKey}T${hour.toString().padStart(2, "0")}:00:00`);
       const end = new Date(start);
       end.setHours(end.getHours() + 1);
-      await queueTaskMutation({
+      const before = cloneTask(pendingTask);
+      const after = {
         ...pendingTask,
         list_id: pendingTask.list_id ?? null,
         due_date: dayKey,
         planned_start: start.toISOString(),
         planned_end: end.toISOString(),
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "schedule_slot", taskId: after.id, before, after });
       setPendingTask(null);
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
-    [pendingTask, queryClient],
+    [pendingTask, queryClient, pushUndo, recordHistory],
   );
 
   const [showBacklog, setShowBacklog] = useState(true);
@@ -285,6 +338,13 @@ export default function ListsScreen() {
   useEffect(() => {
     setDragPreview(null);
   }, [viewMode]);
+
+  useEffect(() => {
+    (async () => {
+      const latest = await fetchLatestHistory({ skipUndoRedo: true });
+      setHasHistory(Boolean(latest));
+    })();
+  }, []);
 
   const inboxListId = inboxList?.id ?? null;
 
@@ -516,40 +576,47 @@ export default function ListsScreen() {
       status: "todo",
       due_date: null,
     };
+    pushUndo({ kind: "add", after: newTask, label: "Added task" });
     await queueTaskMutation(newTask);
+    recordHistory({ action: "add", taskId: newTask.id, before: null, after: newTask });
     queryClient.invalidateQueries({ queryKey: ["backlog"] });
   }
 
   async function handleToggleBacklogTask(task: LocalTask) {
-    await queueTaskMutation({
-      ...task,
-      status: task.status === "done" ? "todo" : "done",
-      updated_at: new Date().toISOString(),
-    });
+    const before = cloneTask(task);
+    const after = { ...task, status: task.status === "done" ? "todo" : "done", updated_at: new Date().toISOString() };
+    pushUndo({ kind: "update", before, after, label: after.status === "done" ? "Marked done" : "Marked todo" });
+    await queueTaskMutation(after);
+    recordHistory({ action: "toggle", taskId: task.id, before, after });
     queryClient.invalidateQueries({ queryKey: ["backlog"] });
   }
 
   const handleMoveBacklogTask = useCallback(
     async (task: LocalTask, listId: string) => {
       if (task.list_id === listId) return;
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: listId,
         due_date: null,
         planned_start: null,
         planned_end: null,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Moved task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "move_backlog", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
     },
-    [queryClient],
+    [queryClient, pushUndo, recordHistory],
   );
 
   const handleReorderBacklogTaskDirect = useCallback(
     async (task: LocalTask, listId: string, targetTaskId: string | null, position: "before" | "after") => {
       const listTasks = (backlogByList[listId] ?? []).filter((candidate) => candidate.id !== task.id);
       const nextSortIndex = computeBacklogSortIndex(listTasks, targetTaskId, position);
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: listId,
         due_date: null,
@@ -557,26 +624,33 @@ export default function ListsScreen() {
         planned_end: null,
         sort_index: nextSortIndex,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Reordered task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "reorder_backlog", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
     },
-    [backlogByList, queryClient],
+    [backlogByList, queryClient, pushUndo, recordHistory],
   );
 
   const handleAssignBacklogTaskToDay = useCallback(
     async (task: LocalTask, dayKey: string) => {
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: task.list_id ?? null,
         due_date: dayKey,
         planned_start: null,
         planned_end: null,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "schedule_day", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
-    [queryClient],
+    [queryClient, pushUndo, recordHistory],
   );
 
   const handleAssignBacklogTaskToSlot = useCallback(
@@ -584,19 +658,23 @@ export default function ListsScreen() {
       const start = new Date(`${dayKey}T${hour.toString().padStart(2, "0")}:00:00`);
       const end = new Date(start);
       end.setHours(end.getHours() + 1);
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: task.list_id ?? null,
         due_date: dayKey,
         planned_start: start.toISOString(),
         planned_end: end.toISOString(),
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "schedule_slot", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["task", task.id] });
     },
-    [queryClient],
+    [queryClient, pushUndo, recordHistory],
   );
 
   async function handleAddScheduledTask(dayKey: string, title: string) {
@@ -608,16 +686,18 @@ export default function ListsScreen() {
       status: "todo",
       due_date: dayKey,
     };
+    pushUndo({ kind: "add", after: newTask, label: "Added task" });
     await queueTaskMutation(newTask);
+    recordHistory({ action: "add", taskId: newTask.id, before: null, after: newTask });
     queryClient.invalidateQueries({ queryKey: ["tasks"] });
   }
 
   async function handleToggleScheduledTask(task: LocalTask) {
-    await upsertScheduledTask({
-      ...task,
-      status: task.status === "done" ? "todo" : "done",
-      updated_at: new Date().toISOString(),
-    });
+    const before = cloneTask(task);
+    const after = { ...task, status: task.status === "done" ? "todo" : "done", updated_at: new Date().toISOString() };
+    pushUndo({ kind: "update", before, after, label: after.status === "done" ? "Marked done" : "Marked todo" });
+    await upsertScheduledTask(after);
+    recordHistory({ action: "toggle", taskId: task.id, before, after });
   }
 
   function handleBeginSchedule(task: LocalTask) {
@@ -633,18 +713,118 @@ export default function ListsScreen() {
     setBacklogDayHoverKey(dayKey);
   }, []);
 
+  const handleUndo = useCallback(async () => {
+    if (undoBusy) return;
+    setUndoBusy(true);
+    try {
+      let action: UndoAction | null = null;
+      let historyId: string | undefined;
+
+      if (undoStack.length > 0) {
+        action = undoStack[undoStack.length - 1];
+        setUndoStack((prev) => prev.slice(0, -1));
+      } else {
+        const latest = await fetchLatestHistory({ skipUndoRedo: true });
+        if (!latest) {
+          setHasHistory(false);
+          return;
+        }
+        const before = (latest.payload_before ?? null) as LocalTask | null;
+        const after = (latest.payload_after ?? null) as LocalTask | null;
+        if (latest.action === "add") {
+          action = after ? { kind: "add", after, label: "Added task" } : null;
+        } else if (latest.action === "delete") {
+          action = before ? { kind: "delete", before, label: "Deleted task" } : null;
+        } else {
+          action = before && after ? { kind: "update", before, after, label: "Updated task" } : null;
+        }
+        if (!action) {
+          await deleteHistoryEntry(latest.id);
+          return;
+        }
+        historyId = latest.id;
+      }
+
+      if (!action) return;
+
+      if (!historyId) {
+        const latest = await fetchLatestHistory({ skipUndoRedo: true });
+        if (latest) {
+          const targetId = action.kind === "add" ? action.after.id : action.before.id;
+          historyId = latest.task_id === targetId ? latest.id : undefined;
+        }
+      }
+
+      if (action.kind === "add") {
+        await queueTaskDeletion(action.after.id);
+      } else if (action.kind === "delete") {
+        await queueTaskMutation(action.before);
+      } else if (action.kind === "update") {
+        await queueTaskMutation(action.before);
+      }
+
+      setRedoStack((prev) => [...prev, action as UndoAction]);
+      if (historyId) {
+        await deleteHistoryEntry(historyId);
+      }
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    } catch (error) {
+      console.warn("Undo failed", error);
+    } finally {
+      const latest = await fetchLatestHistory({ skipUndoRedo: true });
+      setHasHistory(Boolean(latest));
+      setUndoBusy(false);
+    }
+  }, [undoBusy, undoStack, queryClient]);
+
+  const handleRedo = useCallback(async () => {
+    if (undoBusy || redoStack.length === 0) return;
+    setUndoBusy(true);
+    try {
+      const action = redoStack[redoStack.length - 1];
+      setRedoStack((prev) => prev.slice(0, -1));
+      if (action.kind === "add") {
+        await queueTaskMutation(action.after);
+        recordHistory({ action: "add", taskId: action.after.id, before: null, after: action.after }, { clearRedo: false });
+      } else if (action.kind === "delete") {
+        await queueTaskDeletion(action.before.id);
+        recordHistory({ action: "delete", taskId: action.before.id, before: action.before, after: null }, { clearRedo: false });
+      } else if (action.kind === "update") {
+        await queueTaskMutation(action.after);
+        recordHistory(
+          { action: "update", taskId: action.after.id, before: action.before, after: action.after },
+          { clearRedo: false },
+        );
+      }
+      setUndoStack((prev) => [...prev, action]);
+      queryClient.invalidateQueries({ queryKey: ["backlog"] });
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    } catch (error) {
+      console.warn("Redo failed", error);
+    } finally {
+      const latest = await fetchLatestHistory({ skipUndoRedo: true });
+      setHasHistory(Boolean(latest));
+      setUndoBusy(false);
+    }
+  }, [redoStack, undoBusy, queryClient, recordHistory]);
+
   async function handleResizeTaskTime(task: LocalTask, dayKey: string, startMinutes: number, endMinutes: number) {
     const startDate = new Date(`${dayKey}T00:00:00`);
     startDate.setMinutes(startMinutes);
     const endDate = new Date(`${dayKey}T00:00:00`);
     endDate.setMinutes(endMinutes);
-    await queueTaskMutation({
+    const before = cloneTask(task);
+    const after = {
       ...task,
       due_date: dayKey,
       planned_start: startDate.toISOString(),
       planned_end: endDate.toISOString(),
       updated_at: new Date().toISOString(),
-    });
+    };
+    pushUndo({ kind: "update", before, after, label: "Rescheduled task" });
+    await queueTaskMutation(after);
+    recordHistory({ action: "resize", taskId: task.id, before, after });
     queryClient.invalidateQueries({ queryKey: ["tasks"] });
   }
 
@@ -666,36 +846,44 @@ export default function ListsScreen() {
       } else {
         plannedEnd = plannedStart ? plannedStart : null;
       }
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: task.list_id ?? null,
         due_date: dayKey,
         planned_start: plannedStart,
         planned_end: plannedEnd,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Moved task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "move_scheduled", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["task", task.id] });
     },
-    [queryClient],
+    [queryClient, pushUndo, recordHistory],
   );
 
   const handleReorderScheduledTask = useCallback(
     async (task: LocalTask, dayKey: string, targetTaskId: string, position: "before" | "after") => {
       const dayTasks = (scheduledByDay[dayKey] ?? []).filter((candidate) => candidate.id !== task.id);
       const nextSortIndex = computeBacklogSortIndex(dayTasks, targetTaskId, position);
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: task.list_id ?? null,
         due_date: dayKey,
         sort_index: nextSortIndex,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Reordered task" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "reorder_scheduled", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["task", task.id] });
     },
-    [queryClient, scheduledByDay],
+    [queryClient, scheduledByDay, pushUndo, recordHistory],
   );
 
   const handleMoveScheduledTaskToBacklog = useCallback(
@@ -703,7 +891,8 @@ export default function ListsScreen() {
       const listTasks = (backlogByList[listId] ?? []).filter((candidate) => candidate.id !== task.id);
       const effectivePosition = targetTaskId ? position ?? "after" : "after";
       const nextSortIndex = computeBacklogSortIndex(listTasks, targetTaskId ?? null, effectivePosition);
-      await queueTaskMutation({
+      const before = cloneTask(task);
+      const after = {
         ...task,
         list_id: listId,
         due_date: null,
@@ -711,12 +900,15 @@ export default function ListsScreen() {
         planned_end: null,
         sort_index: nextSortIndex,
         updated_at: new Date().toISOString(),
-      });
+      };
+      pushUndo({ kind: "update", before, after, label: "Moved to backlog" });
+      await queueTaskMutation(after);
+      recordHistory({ action: "move_to_backlog", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["task", task.id] });
     },
-    [backlogByList, queryClient],
+    [backlogByList, queryClient, pushUndo, recordHistory],
   );
 
   function handleOpenTaskDetail(task: LocalTask) {
@@ -787,6 +979,30 @@ export default function ListsScreen() {
                   onOpenSettings={() => setSettingsModalOpen(true)}
                 />
               </View>
+              <Pressable
+                style={[
+                  styles.railToggle,
+                  (undoBusy || (undoStack.length === 0 && !hasHistory)) && styles.railToggleInactive,
+                  styles.undoButton,
+                ]}
+                disabled={undoBusy || (undoStack.length === 0 && !hasHistory)}
+                onPress={handleUndo}
+                accessibilityLabel="Undo last action"
+              >
+                <Feather name="rotate-ccw" size={18} color={colors.text} />
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.railToggle,
+                  (undoBusy || redoStack.length === 0) && styles.railToggleInactive,
+                  styles.undoButton,
+                ]}
+                disabled={undoBusy || redoStack.length === 0}
+                onPress={handleRedo}
+                accessibilityLabel="Redo last undone action"
+              >
+                <Feather name="rotate-cw" size={18} color={colors.text} />
+              </Pressable>
               <Pressable
                 style={[styles.railToggle, !showTimebox && styles.railToggleInactive]}
                 onPress={() => setShowTimebox((prev) => !prev)}
@@ -920,6 +1136,11 @@ export default function ListsScreen() {
         taskId={taskDetailId}
         onClose={() => setTaskDetailId(null)}
         onDeleteTask={async (id) => {
+          const snapshot = findTaskById(backlogByList, scheduledByDay, id);
+          if (snapshot) {
+            pushUndo({ kind: "delete", before: snapshot, label: "Deleted task" });
+            recordHistory({ action: "delete", taskId: snapshot.id, before: snapshot, after: null });
+          }
           await queueTaskDeletion(id);
           queryClient.invalidateQueries({ queryKey: ["tasks"] });
           queryClient.invalidateQueries({ queryKey: ["backlog"] });
@@ -1287,6 +1508,9 @@ function createStyles(colors: ThemeColors) {
   },
   railToggleInactive: {
     opacity: 0.4,
+  },
+  undoButton: {
+    backgroundColor: "transparent",
   },
   navGroup: {
     flexDirection: "row",

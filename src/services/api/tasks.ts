@@ -46,6 +46,66 @@ export async function deleteTaskRow(taskId: string) {
   if (error) throw error;
 }
 
+export type TaskHistoryRow = {
+  id: string;
+  user_id: string;
+  task_id: string;
+  action: string;
+  payload_before: Record<string, unknown> | null;
+  payload_after: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export async function logTaskHistory(entry: {
+  action: string;
+  taskId: string;
+  before?: Partial<LocalTask> | null;
+  after?: Partial<LocalTask> | null;
+}) {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return;
+  const { error } = await supabase.from("task_history").insert({
+    user_id: userId,
+    task_id: entry.taskId,
+    action: entry.action,
+    payload_before: entry.before ?? null,
+    payload_after: entry.after ?? null,
+  });
+  if (error) {
+    console.warn("Failed to log task history", error);
+  }
+}
+
+type HistoryOptions = { skipUndoRedo?: boolean };
+
+export async function fetchLatestHistory(options?: HistoryOptions): Promise<TaskHistoryRow | null> {
+  // Grab a handful of rows so we can ignore undo/redo bookkeeping entries without making
+  // multiple round-trips.
+  const limit = options?.skipUndoRedo ? 20 : 1;
+  const { data, error } = await supabase
+    .from("task_history")
+    .select("id, user_id, task_id, action, payload_before, payload_after, created_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    console.warn("Failed to fetch latest history", error);
+    return null;
+  }
+  const entries = Array.isArray(data) ? data : data ? [data] : [];
+  const filtered = options?.skipUndoRedo
+    ? entries.filter((entry) => !entry.action?.startsWith("undo_") && !entry.action?.startsWith("redo_"))
+    : entries;
+  return (filtered[0] as TaskHistoryRow | undefined) ?? null;
+}
+
+export async function deleteHistoryEntry(id: string) {
+  const { error } = await supabase.from("task_history").delete().eq("id", id);
+  if (error) {
+    console.warn("Failed to delete history entry", error);
+  }
+}
+
 export async function countTasksInList(listId: string) {
   const { count, error } = await supabase
     .from("tasks")
