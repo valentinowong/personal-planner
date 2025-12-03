@@ -380,60 +380,43 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         await upsertTaskRow(taskPatch);
       }
     }
-    // Keep the currently open occurrence override (if any) in sync with the series edits so it won't
-    // revert on the next refresh when an override row exists for this date.
-    if (occurrenceDate) {
-      const occurrencePatch: {
-        recurrence_id: string;
-        occurrence_date: string;
-        status?: LocalTask["status"];
-        title?: string | null;
-        notes?: string | null;
-        list_id?: string | null;
-        planned_start?: string | null;
-        planned_end?: string | null;
-        moved_to_date?: string | null;
-      } = {
-        recurrence_id: recurrenceId,
-        occurrence_date: occurrenceDate,
-      };
-      if ("status" in changes) occurrencePatch.status = changes.status;
-      if ("title" in changes) occurrencePatch.title = (changes.title as string | undefined) ?? null;
-      if ("notes" in changes) occurrencePatch.notes = (changes.notes as string | null | undefined) ?? null;
-      if ("list_id" in changes) occurrencePatch.list_id = (changes.list_id as string | null | undefined) ?? null;
-      if ("planned_start" in changes) occurrencePatch.planned_start = changes.planned_start ?? null;
-      if ("planned_end" in changes) occurrencePatch.planned_end = changes.planned_end ?? null;
-      if ("due_date" in changes) occurrencePatch.moved_to_date = changes.due_date ?? null;
-      if (Object.keys(occurrencePatch).length > 2) {
-        await upsertRecurrenceOccurrence(occurrencePatch);
-      }
-    }
     await queryClient.invalidateQueries({ queryKey: ["recurrence", recurrenceId] });
     await queryClient.invalidateQueries({ queryKey: ["tasks"] });
   }
 
-  async function detachOccurrence(changes: Partial<LocalTask>) {
-    if (!recurrenceId || !occurrenceDate || !baseTask) return;
-    const newTask: LocalTask = {
-      id: generateUUID(),
-      list_id: (changes.list_id as string | null | undefined) ?? baseTask.list_id ?? null,
-      title: (changes.title as string | undefined) ?? title,
-      notes: (changes.notes as string | null | undefined) ?? notes,
-      status: changes.status ?? baseTask.status ?? "todo",
-      due_date: (changes.due_date as string | null | undefined) ?? dateInput ?? occurrenceDate,
-      planned_start: (changes.planned_start as string | null | undefined) ?? baseTask.planned_start ?? null,
-      planned_end: (changes.planned_end as string | null | undefined) ?? baseTask.planned_end ?? null,
-      estimate_minutes: baseTask.estimate_minutes ?? null,
-      actual_minutes: changes.actual_minutes ?? baseTask.actual_minutes ?? null,
-      priority: baseTask.priority ?? null,
-    };
-    await upsertRecurrenceOccurrence({
+  async function applyChangesToOccurrence(changes: Partial<LocalTask>) {
+    if (!recurrenceId || !occurrenceDate) return;
+    const occurrencePatch: {
+      recurrence_id: string;
+      occurrence_date: string;
+      status?: LocalTask["status"];
+      title?: string | null;
+      notes?: string | null;
+      list_id?: string | null;
+      planned_start?: string | null;
+      planned_end?: string | null;
+      actual_minutes?: number | null;
+      moved_to_date?: string | null;
+    } = {
       recurrence_id: recurrenceId,
       occurrence_date: occurrenceDate,
-      skip: true,
-    });
-    await queueTaskMutation(newTask);
-    await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    };
+
+    if ("status" in changes) occurrencePatch.status = changes.status;
+    if ("title" in changes) occurrencePatch.title = (changes.title as string | undefined) ?? null;
+    if ("notes" in changes) occurrencePatch.notes = (changes.notes as string | null | undefined) ?? null;
+    if ("list_id" in changes) occurrencePatch.list_id = (changes.list_id as string | null | undefined) ?? null;
+    if ("planned_start" in changes) occurrencePatch.planned_start = changes.planned_start ?? null;
+    if ("planned_end" in changes) occurrencePatch.planned_end = changes.planned_end ?? null;
+    if ("actual_minutes" in changes) occurrencePatch.actual_minutes = changes.actual_minutes ?? null;
+    if ("due_date" in changes) occurrencePatch.moved_to_date = changes.due_date ?? null;
+    if ("moved_to_date" in changes) occurrencePatch.moved_to_date = changes.moved_to_date ?? null;
+
+    // Only write if something besides the keys is present
+    if (Object.keys(occurrencePatch).length > 2) {
+      await upsertRecurrenceOccurrence(occurrencePatch);
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    }
   }
 
   async function saveChangesWithScope(changes: Partial<LocalTask>) {
@@ -464,7 +447,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       if (scope === "series") {
         await applyChangesToRecurrence(pending);
       } else {
-        await detachOccurrence(pending);
+        await applyChangesToOccurrence(pending);
       }
       patchLocalTaskCache(pending);
     } finally {

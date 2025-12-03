@@ -22,7 +22,7 @@ import {
   PlannerDeleteListModal,
   PlannerSettingsModal,
   PlannerTaskDetailModal,
-} from "../components/PlannerModals";
+} from "../components/modals";
 import { PlannerStylesContext } from "../state/PlannerStylesContext";
 import { PlannerTaskBoard } from "../components/PlannerTaskBoard";
 import { PlannerWeekCalendarGrid } from "../components/PlannerWeekCalendarGrid";
