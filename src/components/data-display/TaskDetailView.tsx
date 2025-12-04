@@ -16,14 +16,7 @@ import {
 } from "react-native";
 import type { LocalTask } from "../../data/local/db";
 import { supabase } from "../../data/remote/client";
-import {
-  fetchRecurrence,
-  setRecurrenceActive,
-  upsertRecurrence,
-  upsertRecurrenceOccurrence,
-  upsertTaskRow,
-  type RecurrenceRow,
-} from "../../data/remote/tasksApi";
+import { fetchRecurrence, upsertRecurrence, upsertRecurrenceOccurrence, upsertTaskRow, type RecurrenceRow } from "../../data/remote/tasksApi";
 import type { TaskWindowRow } from "../../data/sync";
 import { queueTaskMutation } from "../../data/sync";
 import { generateUUID } from "../../domain/shared/uuid";
@@ -47,6 +40,7 @@ type Props = {
   scrollStyle?: StyleProp<ViewStyle>;
   contentStyle?: StyleProp<ViewStyle>;
   onDirtyChange?: (dirty: boolean) => void;
+  onScopeChange?: (scope: "series" | "occurrence", hasRecurrence: boolean) => void;
 };
 
 type SectionKey = "title" | "notes" | "list" | "schedule" | "subtasks";
@@ -145,10 +139,11 @@ type Styles = ReturnType<typeof createStyles>;
 
 export type TaskDetailViewHandle = {
   savePendingFields: () => Promise<void>;
+  detachOccurrence: () => Promise<void>;
 };
 
 export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function TaskDetailView(
-  { taskId, initialTask, scrollStyle, contentStyle, onDirtyChange }: Props,
+  { taskId, initialTask, scrollStyle, contentStyle, onDirtyChange, onScopeChange }: Props,
   ref,
 ) {
   const queryClient = useQueryClient();
@@ -192,6 +187,8 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   const [status, setStatus] = useState<LocalTask["status"]>("todo");
   const [isEditing, setIsEditing] = useState(false);
   const [hasPendingEdits, setHasPendingEdits] = useState(false);
+  const [pendingRecurrenceChanges, setPendingRecurrenceChanges] = useState<Partial<RecurrenceRow> | null>(null);
+  const [editScope, setEditScope] = useState<"series" | "occurrence">("series");
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     title: false,
     notes: false,
@@ -200,8 +197,14 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
     subtasks: false,
   });
   const [repeatModalOpen, setRepeatModalOpen] = useState(false);
-  const recurrencePromptResolver = useRef<(() => void) | null>(null);
-  const [recurrencePrompt, setRecurrencePrompt] = useState<Partial<LocalTask> | null>(null);
+
+  const isRepeating = isRecurring || repeatMode !== "none" || Boolean(pendingRecurrenceChanges);
+
+  useEffect(() => {
+    const scope = isRepeating ? editScope : "series";
+    const hasSeriesContext = Boolean(recurrenceId || isRepeating);
+    onScopeChange?.(scope, hasSeriesContext);
+  }, [editScope, isRepeating, onScopeChange, recurrenceId]);
 
   const markDirty = (next: boolean) => {
     setHasPendingEdits(next);
@@ -308,6 +311,11 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       setEndTimeInput(formatTimeInputValue(baseTask.planned_end));
       setListAssignment(baseTask.list_id ?? null);
       setStatus(baseTask.status ?? "todo");
+      if (baseTask.is_recurring) {
+        setEditScope(baseTask.occurrence_date ? "occurrence" : "series");
+      } else {
+        setEditScope("series");
+      }
     }
   }, [baseTask, lastLoadedTaskId, isEditing, hasPendingEdits]);
 
@@ -325,8 +333,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   });
 
   async function applyChangesToRecurrence(changes: Partial<LocalTask>) {
-    if (!recurrenceId) return;
-    const source: Partial<RecurrenceRow> = recurrenceQuery.data ?? {
+    const source: Partial<RecurrenceRow> = recurrenceQuery.data ?? pendingRecurrenceChanges ?? {
       start_date: dateInput || occurrenceDate || new Date().toISOString().split("T")[0],
       title,
       notes,
@@ -342,7 +349,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         })()];
     const startDateKey = (changes.due_date as string | null | undefined) ?? source.start_date ?? dateInput ?? occurrenceDate ?? new Date().toISOString().split("T")[0];
     const payload: Partial<RecurrenceRow> & { start_date: string; freq: RecurrenceRow["freq"] } = {
-      id: recurrenceId,
+      id: recurrenceId ?? undefined,
       title: "title" in changes ? (changes.title as string | undefined) ?? "" : source.title ?? "",
       notes: "notes" in changes ? (changes.notes as string | null | undefined) ?? null : source.notes ?? null,
       list_id: "list_id" in changes ? (changes.list_id as string | null | undefined) ?? null : source.list_id ?? null,
@@ -356,9 +363,15 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       freq: "WEEKLY",
       active: true,
     };
-    const result = await upsertRecurrence(payload);
+    const result = await upsertRecurrence({
+      ...payload,
+      ...(pendingRecurrenceChanges ?? {}),
+      template_task_id: recurrenceId
+        ? recurrenceQuery.data?.template_task_id ?? baseTask?.id ?? null
+        : baseTask?.id ?? null,
+    });
     // Also update the template task so defaults match the series edits.
-    const templateId = recurrenceQuery.data?.template_task_id;
+    const templateId = result?.template_task_id ?? recurrenceQuery.data?.template_task_id;
     if (templateId) {
       const { data: sessionData } = await supabase.auth.getSession();
       const userId = sessionData.session?.user.id;
@@ -388,6 +401,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
     }
     await queryClient.invalidateQueries({ queryKey: ["recurrence", recurrenceId] });
     await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+    setPendingRecurrenceChanges(null);
   }
 
   async function applyChangesToOccurrence(changes: Partial<LocalTask>) {
@@ -425,51 +439,79 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
     }
   }
 
-  async function saveChangesWithScope(changes: Partial<LocalTask>) {
-    if (!baseTask || !Object.keys(changes).length) return;
-    if (!isRecurring) {
+  async function commitChanges(changes: Partial<LocalTask>) {
+    if (!baseTask || (!Object.keys(changes).length && !pendingRecurrenceChanges)) return;
+    if (!isRepeating) {
       await saveMutation.mutateAsync(changes);
       patchLocalTaskCache(changes);
       return;
     }
-    await new Promise<void>((resolve) => {
-      recurrencePromptResolver.current = resolve;
-      setRecurrencePrompt(changes);
-    });
-  }
 
-  async function handleRecurrenceDecision(scope: "occurrence" | "series" | "cancel") {
-    const pending = recurrencePrompt;
-    setRecurrencePrompt(null);
-    const finalize = () => {
-      recurrencePromptResolver.current?.();
-      recurrencePromptResolver.current = null;
-    };
-    if (!pending || scope === "cancel") {
-      finalize();
-      return;
+    if (editScope === "series") {
+      await applyChangesToRecurrence(changes);
+    } else {
+      await applyChangesToOccurrence(changes);
     }
-    try {
-      if (scope === "series") {
-        await applyChangesToRecurrence(pending);
-      } else {
-        await applyChangesToOccurrence(pending);
-      }
-      patchLocalTaskCache(pending);
-    } finally {
-      finalize();
-    }
+    patchLocalTaskCache(changes);
   }
 
   useImperativeHandle(ref, () => ({
     savePendingFields: async () => {
       const changes = buildChangeSet();
       if (changes === null) return;
-      if (!Object.keys(changes).length) {
+      if (!Object.keys(changes).length && !pendingRecurrenceChanges) {
         markDirty(false);
         return;
       }
-      await saveChangesWithScope(changes);
+      await commitChanges(changes);
+      setPendingRecurrenceChanges(null);
+      markDirty(false);
+    },
+    detachOccurrence: async () => {
+      if (!baseTask?.recurrence_id || !occurrenceDate) {
+        throw new Error("Detaching only applies to a recurring occurrence.");
+      }
+      const changes = buildChangeSet();
+      if (changes === null) {
+        throw new Error("Fix validation issues before detaching.");
+      }
+      const schedule = resolveScheduleFromInputs();
+      if (!schedule) {
+        throw new Error("Add a valid schedule before detaching.");
+      }
+
+      const listId = getListId();
+      const dueDate = schedule.due_date ?? occurrenceDate ?? baseTask.due_date ?? null;
+      const detachedTask: LocalTask = {
+        id: generateUUID(),
+        user_id: baseTask.user_id,
+        list_id: listId,
+        title: ("title" in changes ? (changes.title as string | undefined) : baseTask.title) ?? baseTask.title,
+        notes: ("notes" in changes ? (changes.notes as string | null | undefined) : baseTask.notes) ?? null,
+        status: ("status" in changes ? changes.status : baseTask.status) ?? "todo",
+        due_date: dueDate,
+        planned_start: schedule.planned_start ?? baseTask.planned_start ?? null,
+        planned_end: schedule.planned_end ?? baseTask.planned_end ?? null,
+        estimate_minutes: baseTask.estimate_minutes ?? null,
+        actual_minutes: baseTask.actual_minutes ?? null,
+        priority: baseTask.priority ?? null,
+        sort_index: baseTask.sort_index ?? null,
+        updated_at: new Date().toISOString(),
+        is_recurring: false,
+        recurrence_id: null,
+        occurrence_date: null,
+        moved_to_date: null,
+      };
+
+      await upsertRecurrenceOccurrence({
+        recurrence_id: baseTask.recurrence_id,
+        occurrence_date,
+        skip: true,
+      });
+      await queueTaskMutation(detachedTask);
+      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
+      setPendingRecurrenceChanges(null);
       markDirty(false);
     },
   }));
@@ -856,84 +898,64 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       return;
     }
     if (repeatMode === "none") {
-      await handleStopRecurrence();
+      setPendingRecurrenceChanges({ active: false });
+      markDirty(true);
+      setRepeatModalOpen(false);
       return;
     }
-    try {
-      let freq: RecurrenceRow["freq"] = "WEEKLY";
-      let interval = 1;
-      let byday: number[] | null = null;
-      let by_monthday: number[] | null = null;
-      if (repeatMode === "daily") {
-        freq = "DAILY";
-        interval = dailyInterval || 1;
-      } else if (repeatMode === "weekly") {
-        freq = "WEEKLY";
-        const daySet = new Set(recurringDays);
-        const parsed = parseDateKey(dateInput);
-        if (parsed) {
-          daySet.add(parsed.getDay());
-        }
-        byday = Array.from(daySet).sort();
-      } else if (repeatMode === "monthly") {
-        freq = "MONTHLY";
-        const parsed = parseDateKey(dateInput);
-        const fallback = parsed ? parsed.getDate() : new Date(dateInput).getDate();
-        by_monthday = [monthlyDay ?? fallback];
-      } else if (repeatMode === "yearly") {
-        freq = "MONTHLY";
-        interval = 12;
-        const parsed = parseDateKey(dateInput);
-        const fallback = parsed ? parsed.getDate() : new Date(dateInput).getDate();
-        by_monthday = [monthlyDay ?? fallback];
-      }
 
-      const payload = {
-        id: recurrenceId ?? undefined,
-        title: title.trim() || "Untitled task",
-        notes: notes || null,
-        list_id: listAssignment ?? baseTask?.list_id ?? null,
-        freq,
-        interval,
-        byday,
-        by_monthday,
-        start_date: dateInput,
-        until: recurrenceUntil || null,
-        estimate_minutes: baseTask?.estimate_minutes ?? null,
-        priority: baseTask?.priority ?? null,
-        active: true,
-      };
-      const result = await upsertRecurrence({
-        ...payload,
-        template_task_id: recurrenceId ? recurrenceQuery.data?.template_task_id ?? baseTask?.id ?? null : baseTask?.id ?? null,
-      });
-      const newRecurrenceId = result?.id ?? recurrenceId;
-      if (!newRecurrenceId) return;
-      // No longer delete the original task; it remains as the template referenced by the recurrence.
-      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
-      await queryClient.invalidateQueries({ queryKey: ["recurrence", newRecurrenceId] });
-      Alert.alert("Saved", "This task is now repeating.");
-    } catch (error) {
-      console.error("Failed to save recurrence", error);
-      Alert.alert("Could not save", "There was a problem making this task recurring. Please try again.");
+    let freq: RecurrenceRow["freq"] = "WEEKLY";
+    let interval = 1;
+    let byday: number[] | null = null;
+    let by_monthday: number[] | null = null;
+    if (repeatMode === "daily") {
+      freq = "DAILY";
+      interval = dailyInterval || 1;
+    } else if (repeatMode === "weekly") {
+      freq = "WEEKLY";
+      const daySet = new Set(recurringDays);
+      const parsed = parseDateKey(dateInput);
+      if (parsed) {
+        daySet.add(parsed.getDay());
+      }
+      byday = Array.from(daySet).sort();
+    } else if (repeatMode === "monthly") {
+      freq = "MONTHLY";
+      const parsed = parseDateKey(dateInput);
+      const fallback = parsed ? parsed.getDate() : new Date(dateInput).getDate();
+      by_monthday = [monthlyDay ?? fallback];
+    } else if (repeatMode === "yearly") {
+      freq = "MONTHLY";
+      interval = 12;
+      const parsed = parseDateKey(dateInput);
+      const fallback = parsed ? parsed.getDate() : new Date(dateInput).getDate();
+      by_monthday = [monthlyDay ?? fallback];
     }
+
+    const payload: Partial<RecurrenceRow> = {
+      id: recurrenceId ?? undefined,
+      title: title.trim() || "Untitled task",
+      notes: notes || null,
+      list_id: listAssignment ?? baseTask?.list_id ?? null,
+      freq,
+      interval,
+      byday,
+      by_monthday,
+      start_date: dateInput,
+      until: recurrenceUntil || null,
+      estimate_minutes: baseTask?.estimate_minutes ?? null,
+      priority: baseTask?.priority ?? null,
+      active: true,
+    };
+    setPendingRecurrenceChanges(payload);
+    markDirty(true);
+    setRepeatModalOpen(false);
   }
 
   async function handleStopRecurrence() {
-    if (!recurrenceId) {
-      setRepeatMode("none");
-      return;
-    }
-    try {
-      await setRecurrenceActive(recurrenceId, false);
-      setRepeatMode("none");
-      await queryClient.invalidateQueries({ queryKey: ["tasks"] });
-      await queryClient.invalidateQueries({ queryKey: ["recurrence", recurrenceId] });
-      Alert.alert("Stopped", "This series is no longer repeating.");
-    } catch (error) {
-      console.error("Failed to stop recurrence", error);
-      Alert.alert("Could not stop", "There was a problem stopping this recurrence.");
-    }
+    setRepeatMode("none");
+    setPendingRecurrenceChanges({ active: false });
+    markDirty(true);
   }
 
   return (
@@ -942,6 +964,32 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       contentContainerStyle={[styles.container, contentStyle]}
       keyboardShouldPersistTaps="handled"
     >
+      {isRepeating && (recurrenceId || repeatMode !== "none") ? (
+        <View style={styles.scopeRow}>
+          <Text style={styles.helperText}>Apply changes to</Text>
+          <View style={styles.scopeChips}>
+            <Pressable
+              style={[styles.scopeChip, editScope === "occurrence" && styles.scopeChipActive, !recurrenceId && styles.scopeChipDisabled]}
+              disabled={!recurrenceId}
+              onPress={() => recurrenceId && setEditScope("occurrence")}
+            >
+              <Text style={[styles.scopeChipText, editScope === "occurrence" && styles.scopeChipTextActive]}>This occurrence</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.scopeChip, editScope === "series" && styles.scopeChipActive]}
+              onPress={() => setEditScope("series")}
+            >
+              <Text style={[styles.scopeChipText, editScope === "series" && styles.scopeChipTextActive]}>Entire series</Text>
+            </Pressable>
+          </View>
+          {!recurrenceId ? (
+            <Text style={styles.scopeHelperText}>
+              Create the repeat pattern, then you can edit single occurrences.
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
+
       <Section
         title="Schedule"
         sectionKey="schedule"
@@ -1152,31 +1200,6 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         )
       ) : null}
       
-      {recurrencePrompt ? (
-        <Modal visible transparent animationType="fade" onRequestClose={() => handleRecurrenceDecision("cancel")}>
-          <Pressable style={styles.pickerModalBackdrop} onPress={() => handleRecurrenceDecision("cancel")}>
-            <Pressable style={styles.pickerModalCard} onPress={(event) => event.stopPropagation()}>
-              <Text style={styles.pickerModalTitle}>Apply changes</Text>
-              <Text style={styles.helperText}>Do you want to update just this occurrence or the entire series?</Text>
-              <View style={styles.pickerModalActions}>
-                <Pressable style={styles.pickerModalButton} onPress={() => handleRecurrenceDecision("occurrence")}>
-                  <Text style={styles.pickerModalButtonText}>This occurrence only</Text>
-                </Pressable>
-                <Pressable
-                  style={[styles.pickerModalButton, styles.pickerModalButtonPrimary]}
-                  onPress={() => handleRecurrenceDecision("series")}
-                >
-                  <Text style={[styles.pickerModalButtonText, styles.pickerModalButtonPrimaryText]}>Entire series</Text>
-                </Pressable>
-              </View>
-              <Pressable onPress={() => handleRecurrenceDecision("cancel")} style={[styles.pickerModalButton, { marginTop: 8 }]}>
-                <Text style={styles.pickerModalButtonText}>Cancel</Text>
-              </Pressable>
-            </Pressable>
-          </Pressable>
-        </Modal>
-      ) : null}
-
       {repeatModalOpen ? (
         <Modal visible transparent animationType="fade" onRequestClose={() => setRepeatModalOpen(false)}>
           <Pressable style={styles.pickerModalBackdrop} onPress={() => setRepeatModalOpen(false)}>
@@ -1217,7 +1240,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
                       }}
                       style={styles.scheduleActionButtonPrimary}
                     >
-                      <Text style={styles.scheduleActionTextPrimary}>{isRecurring ? "Update recurrence" : "Save repeat"}</Text>
+                      <Text style={styles.scheduleActionTextPrimary}>Apply repeat settings</Text>
                     </Pressable>
                     {isRecurring ? (
                       <Pressable
@@ -1231,6 +1254,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
                       </Pressable>
                     ) : null}
                   </View>
+                  <Text style={styles.helperText}>Repeat settings are staged and saved when you tap Save.</Text>
                 </>
               ) : (
                 <View style={styles.helperRow}>
@@ -1293,6 +1317,40 @@ function createStyles(colors: ThemeColors) {
     },
     section: {
       gap: 8,
+    },
+    scopeRow: {
+      gap: 8,
+    },
+    scopeChips: {
+      flexDirection: "row",
+      gap: 8,
+    },
+    scopeChip: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceAlt,
+    },
+    scopeChipActive: {
+      borderColor: colors.accent,
+      backgroundColor: colors.accent,
+    },
+    scopeChipDisabled: {
+      opacity: 0.4,
+    },
+    scopeChipText: {
+      color: colors.text,
+      fontWeight: "600",
+    },
+    scopeChipTextActive: {
+      color: colors.accentText,
+    },
+    scopeHelperText: {
+      color: colors.textMuted,
+      fontSize: 12,
+      marginTop: 4,
     },
     sectionHeader: {
       flexDirection: "row",

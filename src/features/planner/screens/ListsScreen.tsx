@@ -332,7 +332,10 @@ export default function ListsScreen() {
   const [showBacklog, setShowBacklog] = useState(true);
   const [showTimebox, setShowTimebox] = useState(isDesktop);
   const [taskDetail, setTaskDetail] = useState<LocalTask | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastVariant, setToastVariant] = useState<"success" | "error">("success");
   const taskBoardRef = useRef<FlashListType<PlannerDay> | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RemoteList | null>(null);
   const [deleteTaskCount, setDeleteTaskCount] = useState<number | null>(null);
   const [checkingDeleteTasks, setCheckingDeleteTasks] = useState(false);
@@ -345,6 +348,23 @@ export default function ListsScreen() {
   const taskDays = useMemo(() => buildPlannerDayRange(taskDayWindow.start, taskDayWindow.end), [taskDayWindow]);
   const [taskBoardFocusKey, setTaskBoardFocusKey] = useState(todayKey);
   const [taskBoardRangeLabel, setTaskBoardRangeLabel] = useState<string | null>(null);
+
+  const showToast = useCallback((message: string, variant: "success" | "error" = "success") => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    setToastMessage(message);
+    setToastVariant(variant);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 2200);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const targetStart = plannerOffset * daysPerView - daysPerView * 2;
@@ -1198,7 +1218,29 @@ export default function ListsScreen() {
           queryClient.invalidateQueries({ queryKey: ["backlog"] });
           queryClient.invalidateQueries({ queryKey: ["task", id] });
         }}
+        onShowToast={showToast}
       />
+      {toastMessage ? (
+        <View style={styles.toastContainer} pointerEvents="box-none">
+          <View
+            style={[
+              styles.toastCard,
+              toastVariant === "success"
+                ? { backgroundColor: colors.successAlt, borderColor: colors.success }
+                : { backgroundColor: colors.danger, borderColor: colors.danger },
+            ]}
+          >
+            <Text
+              style={[
+                styles.toastText,
+                toastVariant === "error" ? { color: colors.dangerText } : { color: colors.text },
+              ]}
+            >
+              {toastMessage}
+            </Text>
+          </View>
+        </View>
+      ) : null}
       {Platform.OS === "web" && dragPreview ? (
         dragPreview.variant === "calendar" ? null : dragPreview.variant === "taskBoard" ? (
           <View
@@ -2161,10 +2203,43 @@ function createStyles(colors: ThemeColors) {
     alignItems: "center",
     justifyContent: "space-between",
   },
+  taskDetailTitleWrap: {
+    flex: 1,
+    gap: 6,
+  },
   taskDetailTitle: {
     color: colors.text,
     fontSize: 18,
     fontWeight: "700",
+  },
+  taskDetailStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  taskDetailStatusPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+  },
+  taskDetailStatusUnsaved: {
+    borderColor: colors.accent,
+    backgroundColor: colors.accentMuted,
+  },
+  taskDetailStatusSaved: {
+    borderColor: colors.success,
+    backgroundColor: colors.successAlt,
+  },
+  taskDetailStatusText: {
+    color: colors.text,
+    fontWeight: "600",
   },
   taskDetailActions: {
     flexDirection: "row",
@@ -2196,12 +2271,76 @@ function createStyles(colors: ThemeColors) {
     color: colors.primaryText,
     fontWeight: "700",
   },
+  taskDetailSaveLabel: {
+    alignItems: "flex-start",
+  },
+  taskDetailSaveSubtext: {
+    color: colors.primaryText,
+    fontSize: 12,
+    marginTop: 2,
+    opacity: 0.9,
+  },
+  taskDetailErrorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.danger,
+    backgroundColor: colors.surfaceAlt,
+  },
+  taskDetailErrorText: {
+    color: colors.text,
+    flexShrink: 1,
+  },
   taskDetailScroll: {
     maxHeight: "100%",
   },
   taskDetailContent: {
     backgroundColor: colors.surface,
     paddingBottom: 16,
+  },
+  taskDetailInlineActions: {
+    paddingVertical: 4,
+  },
+  taskDetailDetachButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  taskDetailDetachDisabled: {
+    opacity: 0.6,
+  },
+  taskDetailDetachText: {
+    color: colors.textSecondary,
+    fontWeight: "600",
+  },
+  taskDetailDetachIcon: {
+    marginTop: -1,
+  },
+  toastContainer: {
+    position: "absolute",
+    top: Platform.OS === "web" ? 24 : 48,
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 999,
+    pointerEvents: "box-none",
+  },
+  toastCard: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: colors.border,
+    ...nativeShadow(colors.text, 0.16, 8, 4),
+    elevation: 6,
+  },
+  toastText: {
+    color: colors.text,
+    fontWeight: "700",
   },
   });
 }
