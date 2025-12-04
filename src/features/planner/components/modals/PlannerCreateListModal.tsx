@@ -21,7 +21,7 @@ export function PlannerCreateListModal({ visible, value, onChangeValue, onClose,
         <Pressable style={styles.modalCard} onPress={(event) => event.stopPropagation()}>
           <Text style={styles.modalTitle}>New List</Text>
           <TextInput
-            style={styles.modalInput}
+            style={styles.addTaskInput}
             placeholder="List name"
             placeholderTextColor={colors.placeholder}
             value={value}

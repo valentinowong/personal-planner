@@ -183,7 +183,7 @@ export function PlannerDailyTaskPanel({
         </View>
       </View>
       <Text style={styles.timeboxDate}>{`${day.weekday}, ${day.monthText} ${day.dayNumber}`}</Text>
-      <AddTaskInput placeholder="Add timed task" onSubmit={onAddTask} />
+      <AddTaskInput placeholder="Add task" onSubmit={onAddTask} />
       <ScrollView style={styles.timeboxList}>
         {tasks.map((task) => {
           const metrics = getTaskTimeMetrics(task);

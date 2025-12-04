@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState, type ReactNode } from "react";
 import {
   Alert,
   Modal,
@@ -41,9 +41,11 @@ type Props = {
   contentStyle?: StyleProp<ViewStyle>;
   onDirtyChange?: (dirty: boolean) => void;
   onScopeChange?: (scope: "series" | "occurrence", hasRecurrence: boolean) => void;
+  onStatusChange?: (status: LocalTask["status"]) => void;
+  onTitleChange?: (title: string) => void;
 };
 
-type SectionKey = "title" | "notes" | "list" | "schedule" | "subtasks";
+type SectionKey = "notes" | "list" | "schedule" | "subtasks";
 
 function pad(value: number) {
   return value.toString().padStart(2, "0");
@@ -140,10 +142,21 @@ type Styles = ReturnType<typeof createStyles>;
 export type TaskDetailViewHandle = {
   savePendingFields: () => Promise<void>;
   detachOccurrence: () => Promise<void>;
+  toggleStatus: () => LocalTask["status"];
+  setTitleFromHeader: (value: string) => void;
 };
 
 export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function TaskDetailView(
-  { taskId, initialTask, scrollStyle, contentStyle, onDirtyChange, onScopeChange }: Props,
+  {
+    taskId,
+    initialTask,
+    scrollStyle,
+    contentStyle,
+    onDirtyChange,
+    onScopeChange,
+    onStatusChange,
+    onTitleChange,
+  }: Props,
   ref,
 ) {
   const queryClient = useQueryClient();
@@ -190,7 +203,6 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   const [pendingRecurrenceChanges, setPendingRecurrenceChanges] = useState<Partial<RecurrenceRow> | null>(null);
   const [editScope, setEditScope] = useState<"series" | "occurrence">("series");
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
-    title: false,
     notes: false,
     list: false,
     schedule: false,
@@ -200,16 +212,28 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
 
   const isRepeating = isRecurring || repeatMode !== "none" || Boolean(pendingRecurrenceChanges);
 
+  const markDirty = (next: boolean) => {
+    setHasPendingEdits(next);
+    onDirtyChange?.(next);
+  };
+
+  const applyTitle = (next: string, dirty: boolean) => {
+    setTitle(next);
+    onTitleChange?.(next);
+    if (dirty) markDirty(true);
+  };
+
+  const applyStatus = (next: LocalTask["status"], dirty: boolean) => {
+    setStatus(next);
+    onStatusChange?.(next);
+    if (dirty) markDirty(true);
+  };
+
   useEffect(() => {
     const scope = isRepeating ? editScope : "series";
     const hasSeriesContext = Boolean(recurrenceId || isRepeating);
     onScopeChange?.(scope, hasSeriesContext);
   }, [editScope, isRepeating, onScopeChange, recurrenceId]);
-
-  const markDirty = (next: boolean) => {
-    setHasPendingEdits(next);
-    onDirtyChange?.(next);
-  };
 
   const buildTimeRangeForDate = (dateKey: string) => {
     const startParsed = parseTimeInput(startTimeInput);
@@ -304,13 +328,13 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
     if (isEditing || hasPendingEdits) return;
     if (baseTask && baseTask.id !== lastLoadedTaskId) {
       setLastLoadedTaskId(baseTask.id);
-      setTitle(baseTask.title);
+      applyTitle(baseTask.title, false);
       setNotes(baseTask.notes ?? "");
       setDateInput(baseTask.due_date ?? "");
       setStartTimeInput(formatTimeInputValue(baseTask.planned_start));
       setEndTimeInput(formatTimeInputValue(baseTask.planned_end));
       setListAssignment(baseTask.list_id ?? null);
-      setStatus(baseTask.status ?? "todo");
+      applyStatus(baseTask.status ?? "todo", false);
       if (baseTask.is_recurring) {
         setEditScope(baseTask.occurrence_date ? "occurrence" : "series");
       } else {
@@ -513,6 +537,14 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       await queryClient.invalidateQueries({ queryKey: ["task", taskId] });
       setPendingRecurrenceChanges(null);
       markDirty(false);
+    },
+    toggleStatus: () => {
+      const next = status === "done" ? "todo" : "done";
+      applyStatus(next, true);
+      return next;
+    },
+    setTitleFromHeader: (value: string) => {
+      applyTitle(value, true);
     },
   }));
 
@@ -1020,41 +1052,12 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         </View>
         <View style={styles.scheduleActions}>
           <Pressable onPress={handleClearSchedule} style={styles.scheduleActionButton}>
-            <Text style={styles.scheduleActionText}>Clear schedule</Text>
+            <Text style={styles.scheduleActionText}>Clear</Text>
           </Pressable>
           <Pressable onPress={openRepeatModal} style={styles.scheduleActionButton}>
             <Text style={styles.scheduleActionText}>Repeat task</Text>
           </Pressable>
         </View>
-      </Section>
-
-      <Section
-        title="Title"
-        sectionKey="title"
-        open={!collapsed.title}
-        onToggle={toggleSection}
-        styles={styles}
-        colors={colors}
-      >
-        <TextInput
-          style={styles.input}
-          value={title}
-          onChangeText={(value) => {
-            setTitle(value);
-            markDirty(true);
-          }}
-          onFocus={() => setIsEditing(true)}
-          onBlur={() => setIsEditing(false)}
-        />
-        <Pressable
-          style={[styles.statusButton, status === "done" && styles.statusDone]}
-          onPress={() => {
-            setStatus((current) => (current === "done" ? "todo" : "done"));
-            markDirty(true);
-          }}
-        >
-          <Text style={styles.statusText}>{status === "done" ? "Mark Todo" : "Mark Done"}</Text>
-        </Pressable>
       </Section>
 
       <Section
@@ -1127,7 +1130,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
             onChangeTitle={(value) => upsertSubtask({ ...item, title: value })}
           />
         ))}
-        <AddTaskInput placeholder="Add a subtask" onSubmit={handleAddSubtask} />
+        <AddTaskInput placeholder="Add task" onSubmit={handleAddSubtask} />
       </Section>
 
       {activePicker ? (
@@ -1387,20 +1390,6 @@ function createStyles(colors: ThemeColors) {
     notes: {
       minHeight: 120,
       textAlignVertical: "top",
-    },
-    statusButton: {
-      paddingHorizontal: 16,
-      paddingVertical: 10,
-      borderRadius: 10,
-      backgroundColor: colors.surfaceAlt,
-      alignSelf: "flex-start",
-    },
-    statusDone: {
-      backgroundColor: colors.success,
-    },
-    statusText: {
-      color: colors.text,
-      fontWeight: "600",
     },
     sectionTitle: {
       fontSize: 18,

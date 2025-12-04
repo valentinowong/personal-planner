@@ -355,7 +355,7 @@ export function PlannerTaskBoard({
                 </View>
               );
             })}
-            <AddTaskInput placeholder="Add a task" onSubmit={(title) => onAddTask(day.key, title)} />
+            <AddTaskInput placeholder="Add task" onSubmit={(title) => onAddTask(day.key, title)} />
           </View>
         );
       }}

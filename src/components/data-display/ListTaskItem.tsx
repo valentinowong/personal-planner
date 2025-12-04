@@ -72,7 +72,6 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       padding: 12,
       borderRadius: 12,
       backgroundColor: colors.surface,
-      marginBottom: 10,
       gap: 10,
       ...baseShadow,
     },

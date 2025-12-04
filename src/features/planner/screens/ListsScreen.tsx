@@ -26,7 +26,7 @@ import {
 import { PlannerStylesContext } from "../state/PlannerStylesContext";
 import { PlannerTaskBoard } from "../components/PlannerTaskBoard";
 import { PlannerWeekCalendarGrid } from "../components/PlannerWeekCalendarGrid";
-import { DAY_COLUMN_WIDTH, HOUR_BLOCK_HEIGHT } from "../utils/time";
+import { CALENDAR_DAY_WIDTH, DAY_COLUMN_WIDTH, HOUR_BLOCK_HEIGHT } from "../utils/time";
 import type { DeleteAction, PlannerDay, PlannerDragPreview, PlannerViewMode } from "../types";
 import { useAuth } from "../../auth/context/AuthContext";
 import { useListsDrawer } from "../state/ListsDrawerContext";
@@ -1298,6 +1298,7 @@ function createStyles(colors: ThemeColors) {
           shadowOffset: { width: 0, height },
           elevation: Math.max(1, Math.round(radius)),
         };
+  const calendarBorder = colors.border === "#e2e8f0" ? "#cbd5e1" : colors.border;
   return StyleSheet.create({
   safe: {
     flex: 1,
@@ -1427,12 +1428,12 @@ function createStyles(colors: ThemeColors) {
     fontSize: 12,
   },
   listTasksContainer: {
-    gap: 6,
+    gap: 4,
   },
   listTaskWrapper: {
     gap: 4,
     position: "relative",
-    paddingVertical: 6,
+    paddingVertical: 2,
   },
   listTaskGhostWrapper: {
     opacity: 0.7,
@@ -1690,31 +1691,35 @@ function createStyles(colors: ThemeColors) {
   },
   calendarGridWrapper: {
     paddingBottom: 24,
+    flexGrow: 1,
+    minWidth: "100%",
   },
   calendarGrid: {
     borderRadius: 20,
     borderWidth: 1,
     borderColor: colors.border,
     overflow: "hidden",
+    flex: 1,
   },
   calendarGridHeader: {
     flexDirection: "row",
     backgroundColor: colors.panelBackground,
     borderBottomWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
   },
   calendarGridCorner: {
     width: 90,
     padding: 12,
     borderRightWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
   },
   calendarHeaderCell: {
-    width: 160,
+    flex: 1,
+    minWidth: CALENDAR_DAY_WIDTH,
     paddingVertical: 12,
     paddingHorizontal: 8,
     borderRightWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
   },
   calendarHeaderCellSelected: {
     backgroundColor: colors.surfaceAlt,
@@ -1737,14 +1742,14 @@ function createStyles(colors: ThemeColors) {
   calendarHoursColumn: {
     width: 90,
     borderRightWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
   },
   calendarHourRow: {
     height: HOUR_BLOCK_HEIGHT,
     justifyContent: "center",
     alignItems: "center",
     borderBottomWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
   },
   calendarHourRowLast: {
     borderBottomWidth: 0,
@@ -1754,9 +1759,10 @@ function createStyles(colors: ThemeColors) {
     fontSize: 12,
   },
   calendarDayColumn: {
-    width: 160,
+    flex: 1,
+    minWidth: CALENDAR_DAY_WIDTH,
     borderRightWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
     position: "relative",
   },
   calendarDaySlots: {
@@ -1765,7 +1771,7 @@ function createStyles(colors: ThemeColors) {
   calendarDaySlot: {
     height: HOUR_BLOCK_HEIGHT,
     borderBottomWidth: 1,
-    borderColor: colors.border,
+    borderColor: calendarBorder,
   },
   calendarDaySlotSelected: {
     backgroundColor: colors.surfaceElevated,
@@ -2163,6 +2169,16 @@ function createStyles(colors: ThemeColors) {
   modalPrimaryDisabled: {
     backgroundColor: colors.accentMuted,
   },
+  addTaskInput: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.inputBackground,
+    color: colors.text,
+    fontSize: 16,
+  },
   modalPrimaryText: {
     color: colors.primaryText,
     fontWeight: "600",
@@ -2212,6 +2228,19 @@ function createStyles(colors: ThemeColors) {
     fontSize: 18,
     fontWeight: "700",
   },
+  taskDetailTitleDone: {
+    textDecorationLine: "line-through",
+    color: colors.textMuted,
+  },
+  taskDetailTitleInput: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: "700",
+    paddingVertical: 4,
+    paddingHorizontal: 0,
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+  },
   taskDetailStatusRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -2244,7 +2273,39 @@ function createStyles(colors: ThemeColors) {
   taskDetailActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: 10,
+  },
+  taskDetailFooter: {
+    marginTop: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  taskDetailFooterSpacer: {
+    flex: 1,
+  },
+  taskDetailStatusToggle: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 2,
+    borderColor: colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceAlt,
+  },
+  taskDetailStatusToggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 0,
+  },
+  taskDetailStatusToggleDone: {
+    borderColor: colors.success,
+    backgroundColor: colors.success,
+  },
+  taskDetailStatusToggleDisabled: {
+    opacity: 0.6,
   },
   taskDetailActionButton: {
     paddingHorizontal: 12,

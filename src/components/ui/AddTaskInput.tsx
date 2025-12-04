@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme";
 
-const BUTTON_SIZE = 40;
+const BUTTON_SIZE = 34;
 const BUTTON_OFFSET = 8;
 
 type Props = {

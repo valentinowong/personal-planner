@@ -2,19 +2,19 @@ import { Ionicons } from "@expo/vector-icons";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import { ListTaskItem } from "../../../components/data-display/ListTaskItem";
+import { AddTaskInput } from "../../../components/ui/AddTaskInput";
+import type { LocalTask } from "../../../data/local/db";
 import { useTheme } from "../../../theme/ThemeContext";
 import type { RemoteList } from "../hooks/useLists";
-import type { LocalTask } from "../../../data/local/db";
-import { AddTaskInput } from "../../../components/ui/AddTaskInput";
-import { ListTaskItem } from "../../../components/data-display/ListTaskItem";
+import { usePlannerStyles } from "../state/PlannerStylesContext";
+import type { PlannerDragPreview } from "../types";
 import {
   BACKLOG_LIST_HEADER_ID_PREFIX,
   BACKLOG_LIST_ZONE_ID_PREFIX,
   type PlannerListHoverTarget,
   resolvePlannerDropTarget,
 } from "./drag/dropTargets";
-import { usePlannerStyles } from "../state/PlannerStylesContext";
-import type { PlannerDragPreview } from "../types";
 
 export type PlannerBacklogPanelProps = {
   lists: RemoteList[];
@@ -262,9 +262,8 @@ export function PlannerBacklogPanel({
             style={[styles.drawerListItem, showAllLists && styles.drawerListItemActive]}
           >
             <Text style={[styles.drawerListLabel, showAllLists && styles.drawerListLabelActive]} numberOfLines={1}>
-              {showAllLists ? "Hide View All" : "View All Lists"}
+              All lists
             </Text>
-            <Ionicons name={showAllLists ? "eye" : "eye-outline"} size={16} color={colors.textMuted} />
           </Pressable>
         ) : null}
         {lists.map((list) => {
@@ -341,7 +340,7 @@ export function PlannerBacklogPanel({
               </Pressable>
               {expanded ? (
                 <>
-                  <AddTaskInput placeholder={`Add to ${listTitle}`} onSubmit={(title) => onAddTask(list.id, title)} />
+                  <AddTaskInput placeholder="Add task" onSubmit={(title) => onAddTask(list.id, title)} />
                   {isLoading ? (
                     <ActivityIndicator color={colors.accentMuted} />
                   ) : listTasks.length ? (

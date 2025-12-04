@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, Text, TextInput, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { TaskDetailView, type TaskDetailViewHandle } from "../../../../components/data-display/TaskDetailView";
 import { queueTaskDeletion } from "../../../../data/sync";
@@ -24,15 +24,22 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
   const [saveError, setSaveError] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState(false);
   const [scopeLabel, setScopeLabel] = useState("This task");
+  const [status, setStatus] = useState<LocalTask["status"] | null>(task?.status ?? null);
+  const [title, setTitle] = useState(task?.title ?? "");
+  const [editingTitle, setEditingTitle] = useState(false);
   const detailRef = useRef<TaskDetailViewHandle | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const headerTitleRef = useRef<TextInput | null>(null);
 
   useEffect(() => {
     setHasChanges(false);
     setSaveError(null);
     setJustSaved(false);
     setScopeLabel("This task");
-  }, [task?.id]);
+    setStatus(task?.status ?? null);
+    setTitle(task?.title ?? "");
+    setEditingTitle(false);
+  }, [task?.id, task?.status, task?.title]);
 
   useEffect(() => {
     if (hasChanges) {
@@ -103,13 +110,56 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
     }
   }, [detaching, onClose, onShowToast]);
 
+  const handleToggleStatus = useCallback(() => {
+    const next = detailRef.current?.toggleStatus();
+    if (next) {
+      setStatus(next);
+    }
+  }, []);
+
   return (
     <Modal visible={Boolean(task)} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
         <Pressable style={styles.taskDetailModalCard} onPress={(event) => event.stopPropagation()}>
           <View style={styles.taskDetailHeader}>
             <View style={styles.taskDetailTitleWrap}>
-              <Text style={styles.taskDetailTitle}>Task Details</Text>
+              {editingTitle ? (
+                <TextInput
+                  ref={headerTitleRef}
+                  style={[
+                    styles.taskDetailTitleInput,
+                    status === "done" && styles.taskDetailTitleDone,
+                  ]}
+                  value={title}
+                  onChangeText={(value) => {
+                    setTitle(value);
+                    detailRef.current?.setTitleFromHeader(value);
+                  }}
+                  onBlur={() => setEditingTitle(false)}
+                  autoFocus
+                  placeholder="Untitled task"
+                  placeholderTextColor={colors.textMuted}
+                  multiline
+                />
+              ) : (
+                <Pressable
+                  onPress={() => {
+                    setEditingTitle(true);
+                    requestAnimationFrame(() => headerTitleRef.current?.focus());
+                  }}
+                  hitSlop={6}
+                >
+                  <Text
+                    style={[
+                      styles.taskDetailTitle,
+                      status === "done" && styles.taskDetailTitleDone,
+                    ]}
+                    numberOfLines={2}
+                  >
+                    {title?.trim() ? title : "Untitled task"}
+                  </Text>
+                </Pressable>
+              )}
               <View style={styles.taskDetailStatusRow}>
                 {hasChanges ? (
                   <View style={[styles.taskDetailStatusPill, styles.taskDetailStatusUnsaved]}>
@@ -124,33 +174,6 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
                   </View>
                 ) : null}
               </View>
-            </View>
-            <View style={styles.taskDetailActions}>
-              <Pressable
-                onPress={onClose}
-                style={[styles.taskDetailActionButton, styles.taskDetailCancel]}
-                disabled={saving || deleting || detaching}
-              >
-                <Text style={styles.taskDetailCancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                onPress={handleSave}
-                style={[
-                  styles.taskDetailActionButton,
-                  styles.taskDetailSave,
-                  (saving || deleting || detaching || !hasChanges) && styles.taskDetailSaveDisabled,
-                ]}
-                disabled={saving || deleting || detaching || !hasChanges}
-              >
-                {saving ? (
-                  <ActivityIndicator size="small" color={colors.primaryText} />
-                ) : (
-                  <View style={styles.taskDetailSaveLabel}>
-                    <Text style={styles.taskDetailSaveText}>Save changes</Text>
-                    <Text style={styles.taskDetailSaveSubtext}>Applies to: {scopeLabel}</Text>
-                  </View>
-                )}
-              </Pressable>
             </View>
           </View>
           {saveError ? (
@@ -174,6 +197,8 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
               }}
               scrollStyle={styles.taskDetailScroll}
               contentStyle={styles.taskDetailContent}
+              onStatusChange={(next) => setStatus(next)}
+              onTitleChange={(next) => setTitle(next)}
             />
           ) : null}
           {task?.is_recurring && task?.recurrence_id && task?.occurrence_date ? (
@@ -194,21 +219,70 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
               </Pressable>
             </View>
           ) : null}
-          {task && onDeleteTask ? (
-            <View style={styles.modalActions}>
-              <Pressable
-                style={[styles.modalDangerButton, deleting && styles.modalDangerDisabled]}
-                disabled={deleting}
-                onPress={handleDelete}
-              >
-                <Ionicons
-                  name="trash-outline"
-                  size={16}
-                  color={deleting ? colors.textMuted : colors.danger}
-                  style={styles.modalDangerIcon}
-                />
-                <Text style={styles.modalDangerText}>{deleting ? "Deleting…" : "Delete task"}</Text>
-              </Pressable>
+          {task ? (
+            <View style={styles.taskDetailFooter}>
+              {onDeleteTask ? (
+                <Pressable
+                  style={[styles.modalDangerButton, deleting && styles.modalDangerDisabled]}
+                  disabled={deleting}
+                  onPress={handleDelete}
+                >
+                  <Ionicons
+                    name="trash-outline"
+                    size={16}
+                    color={deleting ? colors.textMuted : colors.danger}
+                    style={styles.modalDangerIcon}
+                  />
+                  <Text style={styles.modalDangerText}>{deleting ? "Deleting…" : "Delete task"}</Text>
+                </Pressable>
+              ) : (
+                <View style={styles.taskDetailFooterSpacer} />
+              )}
+              <View style={styles.taskDetailActions}>
+                <Pressable
+                  onPress={onClose}
+                  style={[styles.taskDetailActionButton, styles.taskDetailCancel]}
+                  disabled={saving || deleting || detaching}
+                >
+                  <Text style={styles.taskDetailCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleSave}
+                  style={[
+                    styles.taskDetailActionButton,
+                    styles.taskDetailSave,
+                    (saving || deleting || detaching || !hasChanges) && styles.taskDetailSaveDisabled,
+                  ]}
+                  disabled={saving || deleting || detaching || !hasChanges}
+                >
+                  {saving ? (
+                    <ActivityIndicator size="small" color={colors.primaryText} />
+                  ) : (
+                    <View style={styles.taskDetailSaveLabel}>
+                      <Text style={styles.taskDetailSaveText}>Save changes</Text>
+                      <Text style={styles.taskDetailSaveSubtext}>Applies to: {scopeLabel}</Text>
+                    </View>
+                  )}
+                </Pressable>
+                <Pressable
+                  onPress={handleToggleStatus}
+                  style={[
+                    styles.taskDetailStatusToggleRow,
+                    (saving || deleting || detaching) && styles.taskDetailStatusToggleDisabled,
+                  ]}
+                  disabled={saving || deleting || detaching}
+                  accessibilityLabel={status === "done" ? "Mark todo" : "Mark done"}
+                >
+                  <View
+                    style={[
+                      styles.taskDetailStatusToggle,
+                      status === "done" && styles.taskDetailStatusToggleDone,
+                    ]}
+                  >
+                    {status === "done" ? <Ionicons name="checkmark" size={16} color={colors.surface} /> : null}
+                  </View>
+                </Pressable>
+              </View>
             </View>
           ) : null}
         </Pressable>
