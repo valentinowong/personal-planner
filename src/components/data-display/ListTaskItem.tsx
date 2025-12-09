@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import type { LocalTask } from "../../data/local/db";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors, ThemeMode } from "../../theme";
+import { getTaskScheduleState } from "../../domain/tasks/schedule";
 
 type Props = {
   task: LocalTask;
@@ -18,12 +19,15 @@ type Props = {
 export function ListTaskItem({ task, onToggle, onPress, subtitle, dataSet, active = false, showGrabHandle = false }: Props) {
   const isDone = task.status === "done";
   const { colors, mode } = useTheme();
+  const scheduleState = useMemo(() => getTaskScheduleState(task), [task.due_date, task.planned_end, task.planned_start]);
   const styles = useMemo(() => createStyles(colors, mode), [colors, mode]);
+  const scheduleStyleKey =
+    scheduleState === "unscheduled" ? "cardUnscheduled" : scheduleState === "dateOnly" ? "cardDateOnly" : "cardTimed";
 
   return (
     <Pressable
       onPress={() => onPress?.(task)}
-      style={[styles.card, isDone && styles.cardDone, active && styles.cardActive]}
+      style={[styles.card, styles[scheduleStyleKey], isDone && styles.cardDone, active && styles.cardActive]}
       dataSet={dataSet}
       collapsable={false}
     >
@@ -65,6 +69,10 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
         shadowRadius: 10,
         shadowOffset: { width: 0, height: 4 },
       };
+  const unscheduledTint = withAlpha(colors.textMuted, mode === "dark" ? 0.14 : 0.08);
+  const dateOnlyTint = withAlpha(colors.primary, mode === "dark" ? 0.14 : 0.07);
+  const timedTint = withAlpha(colors.primary, mode === "dark" ? 0.22 : 0.12);
+  const dateOnlyBorder = mode === "light" ? "#7fb3ff" : "#4c8dff";
   return StyleSheet.create({
     card: {
       flexDirection: "row",
@@ -74,6 +82,22 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       backgroundColor: colors.surface,
       gap: 10,
       ...baseShadow,
+    },
+    cardUnscheduled: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderStyle: "dashed",
+      backgroundColor: unscheduledTint,
+    },
+    cardDateOnly: {
+      borderWidth: 1,
+      borderColor: dateOnlyBorder,
+      backgroundColor: dateOnlyTint,
+    },
+    cardTimed: {
+      borderWidth: 1.5,
+      borderColor: colors.primary,
+      backgroundColor: timedTint,
     },
     cardDone: {
       opacity: 0.55,
@@ -118,4 +142,13 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       opacity: 0.8,
     },
   });
+}
+
+function withAlpha(hex: string, alpha: number) {
+  const normalized = hex.replace("#", "");
+  if (normalized.length !== 6) return hex;
+  const r = parseInt(normalized.slice(0, 2), 16);
+  const g = parseInt(normalized.slice(2, 4), 16);
+  const b = parseInt(normalized.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }

@@ -2217,7 +2217,8 @@ function createStyles(colors: ThemeColors) {
   taskDetailHeader: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "flex-start",
+    gap: 12,
   },
   taskDetailTitleWrap: {
     flex: 1,

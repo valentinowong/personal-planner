@@ -122,6 +122,24 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
         <Pressable style={styles.taskDetailModalCard} onPress={(event) => event.stopPropagation()}>
           <View style={styles.taskDetailHeader}>
+            <Pressable
+              onPress={handleToggleStatus}
+              style={[
+                styles.taskDetailStatusToggleRow,
+                (saving || deleting || detaching) && styles.taskDetailStatusToggleDisabled,
+              ]}
+              disabled={saving || deleting || detaching}
+              accessibilityLabel={status === "done" ? "Mark todo" : "Mark done"}
+            >
+              <View
+                style={[
+                  styles.taskDetailStatusToggle,
+                  status === "done" && styles.taskDetailStatusToggleDone,
+                ]}
+              >
+                {status === "done" ? <Ionicons name="checkmark" size={16} color={colors.surface} /> : null}
+              </View>
+            </Pressable>
             <View style={styles.taskDetailTitleWrap}>
               {editingTitle ? (
                 <TextInput
@@ -263,24 +281,6 @@ export function PlannerTaskDetailModal({ task, onClose, onDeleteTask, onShowToas
                       <Text style={styles.taskDetailSaveSubtext}>Applies to: {scopeLabel}</Text>
                     </View>
                   )}
-                </Pressable>
-                <Pressable
-                  onPress={handleToggleStatus}
-                  style={[
-                    styles.taskDetailStatusToggleRow,
-                    (saving || deleting || detaching) && styles.taskDetailStatusToggleDisabled,
-                  ]}
-                  disabled={saving || deleting || detaching}
-                  accessibilityLabel={status === "done" ? "Mark todo" : "Mark done"}
-                >
-                  <View
-                    style={[
-                      styles.taskDetailStatusToggle,
-                      status === "done" && styles.taskDetailStatusToggleDone,
-                    ]}
-                  >
-                    {status === "done" ? <Ionicons name="checkmark" size={16} color={colors.surface} /> : null}
-                  </View>
                 </Pressable>
               </View>
             </View>
