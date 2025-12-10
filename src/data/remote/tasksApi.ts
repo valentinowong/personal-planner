@@ -7,6 +7,7 @@ export type TaskWindowRow = {
   id: string;
   user_id: string;
   list_id: string | null;
+  assignee_id?: string | null;
   title: string;
   notes: string | null;
   status: "todo" | "doing" | "done" | "canceled";
@@ -38,6 +39,7 @@ export async function upsertTaskRow(payload: Record<string, unknown>) {
     "id",
     "user_id",
     "list_id",
+    "assignee_id",
     "title",
     "notes",
     "status",
@@ -134,6 +136,16 @@ export type TaskHistoryRow = {
   created_at: string;
 };
 
+export type AssignmentHistoryRow = {
+  id: string;
+  task_id: string;
+  previous_assignee_id: string | null;
+  new_assignee_id: string | null;
+  changed_by: string;
+  created_at: string;
+  note?: string | null;
+};
+
 export async function logTaskHistory(entry: {
   action: string;
   taskId: string;
@@ -152,6 +164,27 @@ export async function logTaskHistory(entry: {
   });
   if (error) {
     console.warn("Failed to log task history", error);
+  }
+}
+
+export async function logAssignmentHistory(entry: {
+  taskId: string;
+  previousAssigneeId: string | null;
+  newAssigneeId: string | null;
+  note?: string | null;
+}) {
+  const { data: sessionData } = await supabase.auth.getSession();
+  const userId = sessionData.session?.user.id;
+  if (!userId) return;
+  const { error } = await supabase.from("assignment_history").insert({
+    task_id: entry.taskId,
+    previous_assignee_id: entry.previousAssigneeId,
+    new_assignee_id: entry.newAssigneeId,
+    changed_by: userId,
+    note: entry.note ?? null,
+  });
+  if (error) {
+    console.warn("Failed to log assignment history", error);
   }
 }
 
@@ -229,4 +262,27 @@ export async function fetchListBacklog(listIds?: string[]) {
   const { data, error } = await query;
   if (error) throw error;
   return (data ?? []) as LocalTask[];
+}
+
+export async function unassignTasksForMember(listId: string, memberUserId: string) {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("id, assignee_id")
+    .eq("list_id", listId)
+    .eq("assignee_id", memberUserId);
+  if (error) throw error;
+  const { error: updateError } = await supabase
+    .from("tasks")
+    .update({ assignee_id: null, updated_at: new Date().toISOString() })
+    .eq("list_id", listId)
+    .eq("assignee_id", memberUserId);
+  if (updateError) throw updateError;
+  for (const row of data ?? []) {
+    await logAssignmentHistory({
+      taskId: row.id,
+      previousAssigneeId: row.assignee_id ?? null,
+      newAssigneeId: null,
+      note: "Auto-unassigned due to share revoke",
+    });
+  }
 }

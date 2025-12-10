@@ -5,6 +5,7 @@ export type LocalTask = {
   id: string;
   user_id?: string;
   list_id: string | null;
+  assignee_id?: string | null;
   title: string;
   notes?: string | null;
   status: "todo" | "doing" | "done" | "canceled";
@@ -63,6 +64,7 @@ const MIGRATIONS: string[] = [
       id text primary key,
       user_id text,
       list_id text,
+      assignee_id text,
       title text not null,
       notes text,
       status text default 'todo',
@@ -130,6 +132,7 @@ const MIGRATIONS: string[] = [
       payload text not null,
       created_at text not null
     );`,
+  `alter table tasks add column if not exists assignee_id text;`,
 ];
 
 let initialized = false;
@@ -165,6 +168,7 @@ async function ensureTasksTableAllowsNullListId() {
   const columns = await db.getAllAsync<ColumnInfo>("pragma table_info('tasks');");
   const listColumn = columns.find((column) => column.name === "list_id");
   if (!listColumn || listColumn.notnull === 0) return;
+  const hasAssignee = columns.some((column) => column.name === "assignee_id");
   await db.execAsync("BEGIN TRANSACTION;");
   try {
     await db.execAsync("ALTER TABLE tasks RENAME TO tasks_old;");
@@ -173,6 +177,7 @@ async function ensureTasksTableAllowsNullListId() {
         id text primary key,
         user_id text,
         list_id text,
+        assignee_id text,
         title text not null,
         notes text,
         status text default 'todo',
@@ -188,11 +193,11 @@ async function ensureTasksTableAllowsNullListId() {
     );
     await db.execAsync(
       `insert into tasks (
-        id, user_id, list_id, title, notes, status, due_date, planned_start, planned_end,
+        id, user_id, list_id, assignee_id, title, notes, status, due_date, planned_start, planned_end,
         estimate_minutes, actual_minutes, priority, sort_index, updated_at
       )
       select
-        id, user_id, list_id, title, notes, status, due_date, planned_start, planned_end,
+        id, user_id, list_id, ${hasAssignee ? "assignee_id" : "null"} as assignee_id, title, notes, status, due_date, planned_start, planned_end,
         estimate_minutes, actual_minutes, priority, sort_index, updated_at
       from tasks_old;`,
     );
@@ -209,12 +214,13 @@ export async function upsertTask(task: LocalTask) {
   if (!db) return;
   await db.runAsync(
     `insert into tasks (
-        id, user_id, list_id, title, notes, status, due_date, planned_start, planned_end,
+        id, user_id, list_id, assignee_id, title, notes, status, due_date, planned_start, planned_end,
         estimate_minutes, actual_minutes, priority, sort_index, updated_at
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(id) do update set
         user_id=excluded.user_id,
         list_id=excluded.list_id,
+        assignee_id=excluded.assignee_id,
         title=excluded.title,
         notes=excluded.notes,
         status=excluded.status,
@@ -231,6 +237,7 @@ export async function upsertTask(task: LocalTask) {
       task.id,
       task.user_id ?? null,
       task.list_id,
+      task.assignee_id ?? null,
       task.title,
       task.notes ?? null,
       task.status,

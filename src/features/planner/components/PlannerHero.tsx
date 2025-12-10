@@ -11,6 +11,10 @@ type PlannerHeroProps = {
   onNext: () => void;
   onToday: () => void;
   onOpenSettings: () => void;
+  onOpenNotifications: () => void;
+  onOpenShare: () => void;
+  shareDisabled?: boolean;
+  unreadCount?: number;
 };
 
 export function PlannerHero({
@@ -21,6 +25,10 @@ export function PlannerHero({
   onNext,
   onToday,
   onOpenSettings,
+  onOpenNotifications,
+  onOpenShare,
+  shareDisabled,
+  unreadCount,
 }: PlannerHeroProps) {
   const styles = usePlannerStyles();
   return (
@@ -46,7 +54,18 @@ export function PlannerHero({
           value={viewMode}
           onChange={(next) => onChangeViewMode(next as "calendar" | "tasks")}
         />
-        <PlannerIconButton icon="person-circle" onPress={onOpenSettings} />
+        <View style={styles.heroActions}>
+          <PlannerIconButton icon="share-social-outline" onPress={onOpenShare} disabled={shareDisabled} />
+          <View style={styles.notificationButton}>
+            <PlannerIconButton icon="notifications-outline" onPress={onOpenNotifications} />
+            {unreadCount && unreadCount > 0 ? (
+              <View style={styles.notificationBadge}>
+                <Text style={styles.notificationBadgeText}>{unreadCount > 9 ? "9+" : unreadCount}</Text>
+              </View>
+            ) : null}
+          </View>
+          <PlannerIconButton icon="person-circle" onPress={onOpenSettings} />
+        </View>
       </View>
     </View>
   );

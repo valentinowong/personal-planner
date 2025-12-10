@@ -16,12 +16,20 @@ import {
 } from "react-native";
 import type { LocalTask } from "../../data/local/db";
 import { supabase } from "../../data/remote/client";
-import { fetchRecurrence, upsertRecurrence, upsertRecurrenceOccurrence, upsertTaskRow, type RecurrenceRow } from "../../data/remote/tasksApi";
+import {
+  fetchRecurrence,
+  logAssignmentHistory,
+  upsertRecurrence,
+  upsertRecurrenceOccurrence,
+  upsertTaskRow,
+  type RecurrenceRow,
+} from "../../data/remote/tasksApi";
 import type { TaskWindowRow } from "../../data/sync";
 import { queueTaskMutation } from "../../data/sync";
 import { generateUUID } from "../../domain/shared/uuid";
 import { useLists } from "../../features/planner/hooks/useLists";
 import { useSubtasks } from "../../features/planner/hooks/useSubtasks";
+import { useListMembers } from "../../features/planner/hooks/useListMembers";
 import type { ThemeColors } from "../../theme";
 import { useTheme } from "../../theme/ThemeContext";
 import { AddTaskInput } from "../ui/AddTaskInput";
@@ -45,7 +53,7 @@ type Props = {
   onTitleChange?: (title: string) => void;
 };
 
-type SectionKey = "notes" | "list" | "schedule" | "subtasks";
+type SectionKey = "notes" | "list" | "assignee" | "schedule" | "subtasks";
 
 function pad(value: number) {
   return value.toString().padStart(2, "0");
@@ -192,6 +200,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   const [activePicker, setActivePicker] = useState<PickerType | null>(null);
   const [pendingPickerValue, setPendingPickerValue] = useState<Date | null>(null);
   const [listAssignment, setListAssignment] = useState<string | null>(null);
+  const [assigneeId, setAssigneeId] = useState<string | null>(null);
   const [recurringDays, setRecurringDays] = useState<Set<number>>(new Set());
   const [recurrenceUntil, setRecurrenceUntil] = useState("");
   const [repeatMode, setRepeatMode] = useState<"none" | "daily" | "weekly" | "monthly" | "yearly">("none");
@@ -205,6 +214,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     notes: false,
     list: false,
+    assignee: false,
     schedule: false,
     subtasks: false,
   });
@@ -311,6 +321,8 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
     if ((schedule.due_date ?? null) !== (baseTask.due_date ?? null)) changes.due_date = schedule.due_date ?? null;
     if ((schedule.planned_start ?? null) !== (baseTask.planned_start ?? null)) changes.planned_start = schedule.planned_start ?? null;
     if ((schedule.planned_end ?? null) !== (baseTask.planned_end ?? null)) changes.planned_end = schedule.planned_end ?? null;
+    const nextAssignee = assigneeId ?? null;
+    if ((nextAssignee ?? null) !== (baseTask.assignee_id ?? null)) changes.assignee_id = nextAssignee;
     return changes;
   }
 
@@ -334,6 +346,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
       setStartTimeInput(formatTimeInputValue(baseTask.planned_start));
       setEndTimeInput(formatTimeInputValue(baseTask.planned_end));
       setListAssignment(baseTask.list_id ?? null);
+      setAssigneeId(baseTask.assignee_id ?? null);
       applyStatus(baseTask.status ?? "todo", false);
       if (baseTask.is_recurring) {
         setEditScope(baseTask.occurrence_date ? "occurrence" : "series");
@@ -465,6 +478,17 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
 
   async function commitChanges(changes: Partial<LocalTask>) {
     if (!baseTask || (!Object.keys(changes).length && !pendingRecurrenceChanges)) return;
+    if ("assignee_id" in changes) {
+      const previousAssignee = baseTask.assignee_id ?? null;
+      const nextAssignee = changes.assignee_id ?? null;
+      if (previousAssignee !== nextAssignee) {
+        await logAssignmentHistory({
+          taskId: baseTask.id,
+          previousAssigneeId: previousAssignee,
+          newAssigneeId: nextAssignee,
+        });
+      }
+    }
     if (!isRepeating) {
       await saveMutation.mutateAsync(changes);
       patchLocalTaskCache(changes);
@@ -510,6 +534,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         id: generateUUID(),
         user_id: baseTask.user_id,
         list_id: listId,
+        assignee_id: assigneeId ?? baseTask.assignee_id ?? null,
         title: ("title" in changes ? (changes.title as string | undefined) : baseTask.title) ?? baseTask.title,
         notes: ("notes" in changes ? (changes.notes as string | null | undefined) : baseTask.notes) ?? null,
         status: ("status" in changes ? changes.status : baseTask.status) ?? "todo",
@@ -570,6 +595,28 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   const currentListName = listAssignment
     ? orderedLists.find((list) => list.id === listAssignment)?.name ?? "Untitled"
     : "Not on a list";
+  const currentListId = useMemo(() => getListId(), [listAssignment, baseTask?.list_id, orderedLists]);
+  const { activeMembers, isLoading: membersLoading } = useListMembers(currentListId);
+  const assigneeOptions = useMemo(
+    () =>
+      activeMembers
+        .filter((member) => Boolean(member.user_id))
+        .map((member) => ({
+          id: member.user_id as string,
+          label: member.email ?? "Collaborator",
+          role: member.role,
+        })),
+    [activeMembers],
+  );
+  const assigneeLabel = assigneeOptions.find((option) => option.id === assigneeId)?.label ?? "Unassigned";
+  useEffect(() => {
+    if (!assigneeId) return;
+    const stillValid = assigneeOptions.some((option) => option.id === assigneeId);
+    if (!stillValid) {
+      setAssigneeId(null);
+      markDirty(true);
+    }
+  }, [assigneeId, assigneeOptions]);
   const scheduleSummary = useMemo(() => {
     if (!dateInput) return "Not scheduled";
     const startParsed = parseTimeInput(startTimeInput);
@@ -627,6 +674,11 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   function handleSelectList(listId: string) {
     if (listAssignment === listId) return;
     setListAssignment(listId);
+    markDirty(true);
+  }
+
+  function handleSelectAssignee(userId: string | null) {
+    setAssigneeId(userId);
     markDirty(true);
   }
 
@@ -1111,6 +1163,47 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         )}
         <Text style={styles.helperText}>
           {(taskQuery.data?.list_id ?? baseTask?.list_id) ? `Currently in ${currentListName}` : "Not currently in a list"}
+        </Text>
+      </Section>
+
+      <Section
+        title="Assignee"
+        sectionKey="assignee"
+        open={!collapsed.assignee}
+        onToggle={toggleSection}
+        styles={styles}
+        colors={colors}
+      >
+        {membersLoading ? (
+          <Text style={styles.helperText}>Loading members…</Text>
+        ) : assigneeOptions.length === 0 ? (
+          <Text style={styles.helperText}>No active members yet. Invite collaborators to assign tasks.</Text>
+        ) : (
+          <View style={styles.listPicker}>
+            <Pressable
+              onPress={() => handleSelectAssignee(null)}
+              style={[styles.listOption, assigneeId === null && styles.listOptionActive]}
+            >
+              <Text style={[styles.listOptionLabel, assigneeId === null && styles.listOptionLabelActive]}>Unassigned</Text>
+            </Pressable>
+            {assigneeOptions.map((option) => {
+              const active = option.id === assigneeId;
+              return (
+                <Pressable
+                  key={option.id}
+                  onPress={() => handleSelectAssignee(option.id)}
+                  style={[styles.listOption, active && styles.listOptionActive]}
+                >
+                  <Text style={[styles.listOptionLabel, active && styles.listOptionLabelActive]}>
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
+        <Text style={styles.helperText}>
+          Assigned to: {assigneeLabel}. Only one assignee at a time; scheduled tasks show up only for that person.
         </Text>
       </Section>
 

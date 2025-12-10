@@ -27,6 +27,7 @@ export type PlannerBacklogPanelProps = {
   onCreateList: () => void;
   onOpenTask: (task: LocalTask) => void;
   onDeleteList: (list: RemoteList) => void;
+  onOpenListDetails: (list: RemoteList) => void;
   undeletableListId: string | null;
   onMoveTask: (task: LocalTask, targetListId: string) => void | Promise<void>;
   onReorderTask: (task: LocalTask, listId: string, targetTaskId: string | null, position: "before" | "after") => void | Promise<void>;
@@ -36,6 +37,8 @@ export type PlannerBacklogPanelProps = {
   onCalendarPreviewChange?: (preview: { task: LocalTask; dayKey: string; startMinutes: number } | null) => void;
   onDayHoverChange?: (dayKey: string | null) => void;
   externalHoverTarget?: PlannerListHoverTarget | null;
+  onBeginSchedule?: (task: LocalTask) => void;
+  onOpenListDetails: (list: RemoteList) => void;
 };
 
 export function PlannerBacklogPanel({
@@ -58,6 +61,8 @@ export function PlannerBacklogPanel({
   onCalendarPreviewChange,
   onDayHoverChange,
   externalHoverTarget,
+  onBeginSchedule,
+  onOpenListDetails,
 }: PlannerBacklogPanelProps) {
   const styles = usePlannerStyles();
   const { colors } = useTheme();
@@ -285,18 +290,16 @@ export function PlannerBacklogPanel({
               <Text style={[styles.drawerListLabel, active && styles.drawerListLabelActive]} numberOfLines={1}>
                 {list.name ?? "Untitled"}
               </Text>
-              {!disableDelete ? (
-                <Pressable
-                  onPress={(event) => {
-                    event.stopPropagation();
-                    onDeleteList(list);
-                  }}
-                  style={styles.listDeleteButton}
-                  hitSlop={10}
-                >
-                  <Ionicons name="trash-outline" size={14} color={colors.textMuted} />
-                </Pressable>
-              ) : null}
+              <Pressable
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onOpenListDetails(list);
+                }}
+                style={styles.listDeleteButton}
+                hitSlop={10}
+              >
+                <Ionicons name="ellipsis-vertical" size={16} color={colors.textMuted} />
+              </Pressable>
             </Pressable>
           );
         })}

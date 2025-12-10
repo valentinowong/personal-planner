@@ -22,6 +22,8 @@ import {
   PlannerDeleteListModal,
   PlannerSettingsModal,
   PlannerTaskDetailModal,
+  PlannerNotificationsModal,
+  PlannerListSettingsModal,
 } from "../components/modals";
 import { PlannerStylesContext } from "../state/PlannerStylesContext";
 import { PlannerTaskBoard } from "../components/PlannerTaskBoard";
@@ -43,11 +45,15 @@ import {
   deleteTasksInList,
   fetchListBacklog,
   logTaskHistory,
+  logAssignmentHistory,
   fetchLatestHistory,
   deleteHistoryEntry,
   moveTasksToList,
   type TaskWindowRow,
 } from "../../../data/remote/tasksApi";
+import { inviteToListShare, revokeShare } from "../../../data/remote/sharesApi";
+import { useNotifications } from "../hooks/useNotifications";
+import { usePendingInvites } from "../hooks/usePendingInvites";
 import type { ThemeColors } from "../../../theme";
 
 type UndoAction =
@@ -131,6 +137,7 @@ function rowToLocalTask(row: TaskWindowRow): LocalTask {
     id: row.id,
     user_id: row.user_id,
     list_id: row.list_id ?? null,
+    assignee_id: row.assignee_id ?? null,
     title: row.title,
     notes: row.notes,
     status: row.status,
@@ -152,6 +159,7 @@ export default function ListsScreen() {
   const isFocused = useIsFocused();
   const queryClient = useQueryClient();
   const { session } = useAuth();
+  const currentUserId = session?.user.id ?? null;
   const patchTaskDetailCache = useCallback(
     (updated: LocalTask) => {
       const key = ["task", updated.id];
@@ -197,6 +205,8 @@ export default function ListsScreen() {
 
   const { data: lists, isLoading: listsLoading, upsertList } = useLists();
   const { activeListId, setActiveListId } = useListsDrawer();
+  const notifications = useNotifications();
+  const pendingInvites = usePendingInvites();
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newListName, setNewListName] = useState("");
@@ -212,6 +222,8 @@ export default function ListsScreen() {
     [plannerDays],
   );
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [notificationsModalOpen, setNotificationsModalOpen] = useState(false);
+  const [listSettingsTarget, setListSettingsTarget] = useState<RemoteList | null>(null);
 
   const earliestWeek = plannerOffset - 1;
   const latestWeek = plannerOffset + 1;
@@ -256,10 +268,31 @@ export default function ListsScreen() {
 
   const orderedLists = useMemo(() => {
     if (!lists) return [];
-    const inbox = lists.find((list) => (list.name ?? "").toLowerCase() === "inbox");
-    const rest = lists.filter((list) => list.id !== inbox?.id);
+    let inbox: RemoteList | null = null;
+    const rest: RemoteList[] = [];
+    lists.forEach((list) => {
+      const isInboxName = (list.name ?? "").toLowerCase() === "inbox";
+      const isInboxCandidate = isInboxName || list.is_system;
+      if (isInboxCandidate) {
+        if (!inbox) {
+          inbox = list;
+        }
+        // Skip additional inbox/system rows to avoid duplicates in UI.
+        return;
+      }
+      rest.push(list);
+    });
     return inbox ? [inbox, ...rest] : rest;
   }, [lists]);
+  const activeList = useMemo(
+    () => orderedLists.find((list) => list.id === activeListId) ?? null,
+    [activeListId, orderedLists],
+  );
+  const isActiveListShareable = useMemo(() => {
+    if (!activeList) return false;
+    const name = (activeList.name ?? "").toLowerCase();
+    return !activeList.is_system && name !== "inbox";
+  }, [activeList]);
   const inboxList = orderedLists[0];
   const backlogListIds = useMemo(() => orderedLists.map((list) => list.id), [orderedLists]);
   const backlogQuery = useQuery({
@@ -267,6 +300,7 @@ export default function ListsScreen() {
     queryFn: () => fetchListBacklog(backlogListIds.length ? backlogListIds : undefined),
     enabled: backlogListIds.length > 0,
   });
+  const undeletableListId = inboxList?.id ?? null;
   const backlogByList = useMemo(() => {
     const bucket: Record<string, LocalTask[]> = {};
     orderedLists.forEach((list) => {
@@ -274,13 +308,14 @@ export default function ListsScreen() {
     });
     const fallbackListId = orderedLists[0]?.id ?? null;
     (backlogQuery.data ?? []).forEach((task) => {
+      if (task.assignee_id && task.assignee_id !== currentUserId) return;
       const targetListId = task.list_id ?? fallbackListId;
       if (!targetListId) return;
       bucket[targetListId] = bucket[targetListId] ?? [];
       bucket[targetListId].push(task);
     });
     return bucket;
-  }, [orderedLists, backlogQuery.data]);
+  }, [orderedLists, backlogQuery.data, currentUserId]);
 
   const handleDropPendingIntoDay = useCallback(
     async (dayKey: string) => {
@@ -292,9 +327,18 @@ export default function ListsScreen() {
         due_date: dayKey,
         planned_start: null,
         planned_end: null,
+        assignee_id: pendingTask.assignee_id ?? currentUserId,
         updated_at: new Date().toISOString(),
       };
       pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      if ((before.assignee_id ?? null) !== (after.assignee_id ?? null)) {
+        await logAssignmentHistory({
+          taskId: after.id,
+          previousAssigneeId: before.assignee_id ?? null,
+          newAssigneeId: after.assignee_id ?? null,
+          note: "Auto-assigned when scheduling",
+        });
+      }
       await queueTaskMutation(after);
       setPendingTask(null);
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
@@ -317,9 +361,18 @@ export default function ListsScreen() {
         due_date: dayKey,
         planned_start: start.toISOString(),
         planned_end: end.toISOString(),
+        assignee_id: pendingTask.assignee_id ?? currentUserId,
         updated_at: new Date().toISOString(),
       };
       pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      if ((before.assignee_id ?? null) !== (after.assignee_id ?? null)) {
+        await logAssignmentHistory({
+          taskId: after.id,
+          previousAssigneeId: before.assignee_id ?? null,
+          newAssigneeId: after.assignee_id ?? null,
+          note: "Auto-assigned when scheduling",
+        });
+      }
       await queueTaskMutation(after);
       recordHistory({ action: "schedule_slot", taskId: after.id, before, after });
       setPendingTask(null);
@@ -365,6 +418,80 @@ export default function ListsScreen() {
       }
     };
   }, []);
+
+  const shareList = useCallback(
+    (list: RemoteList | null) => {
+      if (!list) return;
+      const name = (list.name ?? "").toLowerCase();
+      if (list.is_system || name === "inbox") {
+        showToast("Inbox cannot be shared", "error");
+        return;
+      }
+      setListSettingsTarget(list);
+    },
+    [showToast],
+  );
+
+  const findInviteById = useCallback(
+    (shareId: string) => (pendingInvites.data ?? []).find((invite) => invite.id === shareId) ?? null,
+    [pendingInvites.data],
+  );
+
+  const markInviteNotificationRead = useCallback(
+    async (shareId: string) => {
+      const related = (notifications.data ?? []).find(
+        (item) => (item.kind === "share_invited" || item.kind === "share_invited_sent") && (item.payload as any)?.share_id === shareId,
+      );
+      if (related && !related.read_at) {
+        try {
+          await notifications.markRead(related.id);
+        } catch (err) {
+          console.warn("Failed to mark invite notification read", err);
+        }
+      }
+    },
+    [notifications.data, notifications.markRead],
+  );
+
+  const handleAcceptInvite = useCallback(
+    async (shareId: string) => {
+      const invite = findInviteById(shareId);
+      if (!invite) return;
+      try {
+        await pendingInvites.acceptInvite(invite);
+        await markInviteNotificationRead(invite.id);
+        showToast("Added to list");
+      } catch (err: any) {
+        const code = err?.code ?? err?.status;
+        const message =
+          code === "PGRST301" || code === "PGRST116" || code === 403 || code === 404
+            ? "Invite no longer valid."
+            : "Could not accept invite.";
+        showToast(message, "error");
+      }
+    },
+    [findInviteById, markInviteNotificationRead, pendingInvites, showToast],
+  );
+
+  const handleDeclineInvite = useCallback(
+    async (shareId: string) => {
+      const invite = findInviteById(shareId);
+      if (!invite) return;
+      try {
+        await pendingInvites.declineInvite(invite);
+        await markInviteNotificationRead(invite.id);
+        showToast("Invite declined");
+      } catch (err: any) {
+        const code = err?.code ?? err?.status;
+        const message =
+          code === "PGRST301" || code === "PGRST116" || code === 403 || code === 404
+            ? "Invite no longer valid."
+            : "Could not decline invite.";
+        showToast(message, "error");
+      }
+    },
+    [findInviteById, markInviteNotificationRead, pendingInvites, showToast],
+  );
 
   useEffect(() => {
     const targetStart = plannerOffset * daysPerView - daysPerView * 2;
@@ -435,13 +562,16 @@ export default function ListsScreen() {
       bucket[day.key] = bucket[day.key] ?? [];
     });
     (scheduledRows ?? []).forEach((row) => {
-      if (row.due_date) {
+      const assigneeOk =
+        row.assignee_id === currentUserId ||
+        (!row.assignee_id && row.user_id === currentUserId);
+      if (row.due_date && assigneeOk) {
         bucket[row.due_date] = bucket[row.due_date] ?? [];
         bucket[row.due_date].push(rowToLocalTask(row));
       }
     });
     return bucket;
-  }, [taskDays, scheduledRows]);
+  }, [taskDays, scheduledRows, currentUserId]);
 
   const selectedDay = taskDays.find((day) => day.key === selectedDayKey) ?? taskDays[0];
   const resolvedSelectedDayKey = selectedDay?.key ?? taskDays[0]?.key ?? currentStartKey;
@@ -1019,6 +1149,7 @@ export default function ListsScreen() {
           onCreateList={() => setCreateModalOpen(true)}
           onOpenTask={handleOpenTaskDetail}
           onDeleteList={handleRequestDeleteList}
+          onOpenListDetails={(list) => setListDetailsTarget(list)}
           undeletableListId={inboxList?.id ?? null}
           onMoveTask={handleMoveBacklogTask}
           onReorderTask={handleReorderBacklogTaskDirect}
@@ -1028,6 +1159,7 @@ export default function ListsScreen() {
           onCalendarPreviewChange={setCalendarPreview}
           onDayHoverChange={handleBacklogDayHoverChange}
           externalHoverTarget={backlogHoverOverride}
+          onOpenListDetails={(list) => setListSettingsTarget(list)}
         />
           ) : null}
           <View style={styles.centerPane}>
@@ -1048,6 +1180,10 @@ export default function ListsScreen() {
                   onNext={() => handleShiftWeek(1)}
                   onToday={handleResetToToday}
                   onOpenSettings={() => setSettingsModalOpen(true)}
+                  onOpenNotifications={() => setNotificationsModalOpen(true)}
+                  onOpenShare={() => shareList(activeList)}
+                  shareDisabled={!isActiveListShareable}
+                  unreadCount={notifications.unreadCount}
                 />
               </View>
               <Pressable
@@ -1203,6 +1339,38 @@ export default function ListsScreen() {
           lists={orderedLists}
           onClose={handleCloseDeleteModal}
           onConfirm={handleConfirmDeleteList}
+      />
+      <PlannerNotificationsModal
+        visible={notificationsModalOpen}
+        notifications={notifications.data ?? []}
+        loading={notifications.isLoading}
+        invites={pendingInvites.data ?? []}
+        invitesLoading={pendingInvites.isLoading}
+        onClose={() => setNotificationsModalOpen(false)}
+        onMarkRead={(id) => notifications.markRead(id)}
+        onMarkAll={() => notifications.markAllRead()}
+        onAcceptInvite={handleAcceptInvite}
+        onDeclineInvite={handleDeclineInvite}
+      />
+      <PlannerListSettingsModal
+        visible={Boolean(listSettingsTarget)}
+        list={listSettingsTarget}
+        onClose={() => setListSettingsTarget(null)}
+        onSaveName={async (id, name) => {
+          await upsertList({ id, name });
+          queryClient.invalidateQueries({ queryKey: ["lists"] });
+        }}
+        onDelete={(list) => handleRequestDeleteList(list)}
+        onSendInvite={async (email) => {
+          if (!listSettingsTarget) return;
+          await inviteToListShare({ listId: listSettingsTarget.id, email, role: "collaborator" });
+          queryClient.invalidateQueries({ queryKey: ["list-shares", listSettingsTarget.id] });
+        }}
+        onRemoveMember={async (shareId, memberUserId) => {
+          if (!listSettingsTarget) return;
+          await revokeShare(shareId, { listId: listSettingsTarget.id, memberUserId });
+          queryClient.invalidateQueries({ queryKey: ["list-shares", listSettingsTarget.id] });
+        }}
       />
       <PlannerTaskDetailModal
         task={taskDetail}
@@ -1598,6 +1766,28 @@ function createStyles(colors: ThemeColors) {
     alignItems: "center",
     gap: 12,
   },
+  heroActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  notificationButton: {
+    position: "relative",
+  },
+  notificationBadge: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    backgroundColor: colors.danger,
+    borderRadius: 10,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  notificationBadgeText: {
+    color: colors.dangerText,
+    fontSize: 10,
+    fontWeight: "700",
+  },
   railToggle: {
     width: 36,
     height: 36,
@@ -1946,6 +2136,40 @@ function createStyles(colors: ThemeColors) {
     padding: 0,
     overflow: "hidden",
   },
+  modalSheet: {
+    width: "100%",
+    maxWidth: 880,
+    backgroundColor: colors.surface,
+    borderRadius: 24,
+    padding: 24,
+    gap: 16,
+  },
+  modalHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  modalSubtitle: {
+    color: colors.textSecondary,
+  },
+  modalSection: {
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    padding: 16,
+    gap: 10,
+  },
+  modalSectionTitle: {
+    color: colors.text,
+    fontWeight: "700",
+    fontSize: 15,
+  },
+  modalSectionMeta: {
+    color: colors.textSecondary,
+    fontSize: 12,
+  },
   settingsModalShell: {
     flexDirection: "row",
     minHeight: 520,
@@ -2056,6 +2280,178 @@ function createStyles(colors: ThemeColors) {
     color: colors.text,
     fontWeight: "700",
     fontSize: 16,
+  },
+  shareRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderColor: colors.border,
+  },
+  shareMemberName: {
+    color: colors.text,
+    fontWeight: "600",
+  },
+  shareMemberMeta: {
+    color: colors.textSecondary,
+    fontSize: 12,
+  },
+  notificationRow: {
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: 10,
+    backgroundColor: colors.surfaceAlt,
+    gap: 6,
+  },
+  notificationMeta: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  notificationTitle: {
+    color: colors.text,
+    fontWeight: "700",
+  },
+  notificationTime: {
+    color: colors.textMuted,
+    fontSize: 12,
+  },
+  notificationBody: {
+    color: colors.textSecondary,
+  },
+  notificationBodySecondary: {
+    color: colors.textMuted,
+    fontSize: 12,
+  },
+  notificationUnread: {
+    color: colors.accent,
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  notificationRowTop: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+  },
+  notificationIconWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  notificationKindPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginLeft: 8,
+  },
+  notificationKindText: {
+    color: colors.textMuted,
+    fontSize: 11,
+  },
+  notificationUnreadDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.accent,
+    marginLeft: 8,
+    marginTop: 4,
+  },
+  modalTabRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  modalTab: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+  },
+  modalTabActive: {
+    backgroundColor: colors.surface,
+    borderColor: colors.accent,
+  },
+  modalTabText: {
+    color: colors.textSecondary,
+    fontWeight: "600",
+  },
+  modalTabTextActive: {
+    color: colors.text,
+  },
+  modalTabBadge: {
+    minWidth: 22,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    backgroundColor: colors.accent,
+  },
+  modalTabBadgeText: {
+    color: colors.inverseText,
+    fontWeight: "700",
+    textAlign: "center",
+    fontSize: 12,
+  },
+  inviteCard: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+  },
+  inviteActionsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 10,
+  },
+  inviteButton: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  inviteButtonDisabled: {
+    opacity: 0.7,
+  },
+  inviteButtonText: {
+    color: colors.primaryText,
+    fontWeight: "700",
+  },
+  inviteButtonSecondary: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceAlt,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  inviteButtonSecondaryDisabled: {
+    opacity: 0.6,
+  },
+  inviteButtonSecondaryText: {
+    color: colors.text,
+    fontWeight: "600",
   },
   settingsFormGroup: {
     gap: 6,

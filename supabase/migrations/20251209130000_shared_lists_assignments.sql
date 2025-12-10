@@ -1,0 +1,173 @@
+-- Shared lists, assignments, and notifications
+alter table public.tasks
+  add column if not exists assignee_id uuid;
+
+create table if not exists public.list_shares (
+  id uuid primary key default uuid_generate_v4(),
+  list_id uuid not null references public.lists(id) on delete cascade,
+  user_id uuid references auth.users(id) on delete set null,
+  invited_email text,
+  role text not null default 'collaborator' check (role in ('owner','collaborator')),
+  status text not null default 'pending' check (status in ('pending','active','revoked')),
+  invited_by uuid references auth.users(id),
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
+);
+
+create unique index if not exists list_shares_unique_member on public.list_shares(list_id, user_id) where status <> 'revoked';
+
+create table if not exists public.assignment_history (
+  id uuid primary key default uuid_generate_v4(),
+  task_id uuid not null references public.tasks(id) on delete cascade,
+  previous_assignee_id uuid,
+  new_assignee_id uuid,
+  changed_by uuid not null references auth.users(id),
+  note text,
+  created_at timestamptz default now()
+);
+
+create table if not exists public.notifications (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  kind text not null,
+  payload jsonb,
+  read_at timestamptz,
+  created_at timestamptz default now()
+);
+
+create index if not exists notifications_user_idx on public.notifications(user_id, created_at desc);
+
+-- Ensure we can redefine the function with a new return signature.
+drop function if exists public.get_tasks_window(date, date);
+
+create or replace function public.get_tasks_window(_start date, _end date)
+returns table (
+  id uuid,
+  user_id uuid,
+  list_id uuid,
+  assignee_id uuid,
+  title text,
+  notes text,
+  status task_status,
+  due_date date,
+  planned_start timestamptz,
+  planned_end timestamptz,
+  estimate_minutes int,
+  actual_minutes int,
+  priority int,
+  sort_index int,
+  is_recurring boolean,
+  recurrence_id uuid,
+  occurrence_date date,
+  moved_to_date date
+)
+security definer
+set search_path = public
+language sql
+stable
+as $$
+  with window_days as (
+    select generate_series(_start, _end, interval '1 day')::date as day
+  ),
+  expanded as (
+    select
+      uuid_v5(r.id, d.day::text) as id,
+      r.user_id,
+      coalesce(occ.list_id, r.list_id) as list_id,
+      null::uuid as assignee_id,
+      coalesce(occ.title, r.title) as title,
+      coalesce(occ.notes, r.notes) as notes,
+      coalesce(occ.status, 'todo') as status,
+      coalesce(occ.moved_to_date, d.day) as due_date,
+      coalesce(occ.planned_start, null) as planned_start,
+      coalesce(occ.planned_end, null) as planned_end,
+      r.estimate_minutes,
+      coalesce(occ.actual_minutes, null) as actual_minutes,
+      r.priority,
+      0 as sort_index,
+      true as is_recurring,
+      r.id as recurrence_id,
+      d.day as occurrence_date,
+      occ.moved_to_date,
+      occ.skip
+    from public.recurrences r
+    join window_days d on d.day between _start and _end
+    left join public.recurrence_occurrences occ
+      on occ.recurrence_id = r.id and occ.occurrence_date = d.day
+    where r.user_id = auth.uid()
+      and r.active
+      and r.start_date <= d.day
+      and (r.until is null or d.day <= r.until)
+      and (occ.skip is distinct from true)
+      and (
+        case r.freq
+          when 'DAILY' then ((d.day - r.start_date)::int % r.interval = 0)
+          when 'WEEKLY' then (
+            floor(extract(epoch from (d.day::timestamp - r.start_date::timestamp)) / 604800)::int % r.interval = 0
+          )
+          when 'MONTHLY' then ((date_part('year', age(d.day, r.start_date)) * 12 + date_part('month', age(d.day, r.start_date)))::int % r.interval = 0)
+        end
+      )
+      and (
+        coalesce(cardinality(r.byday), 0) = 0
+        or extract(dow from d.day)::int = any(r.byday)
+      )
+      and (
+        coalesce(cardinality(r.by_monthday), 0) = 0
+        or extract(day from d.day)::int = any(r.by_monthday)
+      )
+  )
+  select * from (
+    select
+      t.id,
+      t.user_id,
+      t.list_id,
+      t.assignee_id,
+      t.title,
+      t.notes,
+      t.status,
+      t.due_date,
+      t.planned_start,
+      t.planned_end,
+      t.estimate_minutes,
+      t.actual_minutes,
+      t.priority,
+      t.sort_index,
+      false as is_recurring,
+      null::uuid as recurrence_id,
+      null::date as occurrence_date,
+      null::date as moved_to_date
+    from public.tasks t
+    where t.due_date between _start and _end
+      and (
+        t.assignee_id = auth.uid()
+        or (t.assignee_id is null and t.user_id = auth.uid())
+      )
+
+    union all
+
+    select
+      e.id,
+      e.user_id,
+      e.list_id,
+      e.assignee_id,
+      e.title,
+      e.notes,
+      e.status,
+      e.due_date,
+      e.planned_start,
+      e.planned_end,
+      e.estimate_minutes,
+      e.actual_minutes,
+      e.priority,
+      e.sort_index,
+      e.is_recurring,
+      e.recurrence_id,
+      e.occurrence_date,
+      e.moved_to_date
+    from expanded e
+  ) combined
+  order by due_date, sort_index, priority desc;
+$$;
+
+grant execute on function public.get_tasks_window(date, date) to anon, authenticated;
