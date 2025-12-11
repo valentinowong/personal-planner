@@ -482,6 +482,7 @@ function DraggableTaskRow({
           subtitle={subtitle}
           active={false}
           showGrabHandle={false}
+          showAssigneeChip
         />
       </GestureDetector>
     </View>

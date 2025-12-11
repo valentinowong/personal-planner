@@ -30,6 +30,7 @@ import { generateUUID } from "../../domain/shared/uuid";
 import { useLists } from "../../features/planner/hooks/useLists";
 import { useSubtasks } from "../../features/planner/hooks/useSubtasks";
 import { useListMembers } from "../../features/planner/hooks/useListMembers";
+import { useAssigneeProfiles } from "../../features/planner/hooks/useAssigneeProfiles";
 import type { ThemeColors } from "../../theme";
 import { useTheme } from "../../theme/ThemeContext";
 import { AddTaskInput } from "../ui/AddTaskInput";
@@ -208,6 +209,7 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
   const [dailyInterval, setDailyInterval] = useState(1);
   const [status, setStatus] = useState<LocalTask["status"]>("todo");
   const [isEditing, setIsEditing] = useState(false);
+  const [assigneePickerOpen, setAssigneePickerOpen] = useState(false);
   const [hasPendingEdits, setHasPendingEdits] = useState(false);
   const [pendingRecurrenceChanges, setPendingRecurrenceChanges] = useState<Partial<RecurrenceRow> | null>(null);
   const [editScope, setEditScope] = useState<"series" | "occurrence">("series");
@@ -596,27 +598,52 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
     ? orderedLists.find((list) => list.id === listAssignment)?.name ?? "Untitled"
     : "Not on a list";
   const currentListId = useMemo(() => getListId(), [listAssignment, baseTask?.list_id, orderedLists]);
-  const { activeMembers, isLoading: membersLoading } = useListMembers(currentListId);
+  const { activeMembers, memberByUserId, isLoading: membersLoading } = useListMembers(currentListId);
+  const { profilesById: assigneeProfiles } = useAssigneeProfiles(undefined, undefined, [assigneeId ?? undefined]);
   const assigneeOptions = useMemo(
     () =>
       activeMembers
         .filter((member) => Boolean(member.user_id))
         .map((member) => ({
           id: member.user_id as string,
-          label: member.email ?? "Collaborator",
+          label: member.display_name || member.email || "Collaborator",
           role: member.role,
         })),
     [activeMembers],
   );
-  const assigneeLabel = assigneeOptions.find((option) => option.id === assigneeId)?.label ?? "Unassigned";
-  useEffect(() => {
-    if (!assigneeId) return;
-    const stillValid = assigneeOptions.some((option) => option.id === assigneeId);
-    if (!stillValid) {
-      setAssigneeId(null);
-      markDirty(true);
-    }
-  }, [assigneeId, assigneeOptions]);
+  const fallbackAssigneeOption = useMemo(() => {
+    if (!assigneeId) return null;
+    const label =
+      baseTask?.assignee_display_name ??
+      memberByUserId[assigneeId]?.display_name ??
+      assigneeProfiles[assigneeId]?.display_name ??
+      baseTask?.assignee_email ??
+      memberByUserId[assigneeId]?.email ??
+      assigneeProfiles[assigneeId]?.email ??
+      "Assigned";
+    return { id: assigneeId, label, role: "collaborator" as const };
+  }, [assigneeId, assigneeProfiles, baseTask?.assignee_display_name, baseTask?.assignee_email, memberByUserId]);
+  const combinedAssigneeOptions = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; role: "owner" | "collaborator" }>();
+    if (fallbackAssigneeOption) map.set(fallbackAssigneeOption.id, fallbackAssigneeOption);
+    assigneeOptions.forEach((opt) => {
+      if (!map.has(opt.id)) map.set(opt.id, opt);
+    });
+    return Array.from(map.values());
+  }, [assigneeOptions, fallbackAssigneeOption]);
+  const assigneeLabel = useMemo(() => {
+    const optionLabel = combinedAssigneeOptions.find((option) => option.id === assigneeId)?.label;
+    if (optionLabel) return optionLabel;
+    const taskDisplay = baseTask?.assignee_display_name ?? memberByUserId[assigneeId ?? ""]?.display_name ?? null;
+    const taskEmail = baseTask?.assignee_email ?? null;
+    const profile = assigneeId ? assigneeProfiles[assigneeId] : null;
+    if (taskDisplay) return taskDisplay;
+    if (profile?.display_name) return profile.display_name;
+    if (taskEmail) return taskEmail;
+    if (profile?.email) return profile.email;
+    return assigneeId ? "Assigned" : "Unassigned";
+  }, [assigneeId, combinedAssigneeOptions, assigneeProfiles, baseTask?.assignee_display_name, baseTask?.assignee_email, memberByUserId]);
+  // Do not auto-clear assignee when options haven’t loaded yet; this avoids false “unsaved changes” on first open.
   const scheduleSummary = useMemo(() => {
     if (!dateInput) return "Not scheduled";
     const startParsed = parseTimeInput(startTimeInput);
@@ -1174,37 +1201,48 @@ export const TaskDetailView = forwardRef<TaskDetailViewHandle, Props>(function T
         styles={styles}
         colors={colors}
       >
-        {membersLoading ? (
-          <Text style={styles.helperText}>Loading members…</Text>
-        ) : assigneeOptions.length === 0 ? (
-          <Text style={styles.helperText}>No active members yet. Invite collaborators to assign tasks.</Text>
-        ) : (
-          <View style={styles.listPicker}>
-            <Pressable
-              onPress={() => handleSelectAssignee(null)}
-              style={[styles.listOption, assigneeId === null && styles.listOptionActive]}
-            >
-              <Text style={[styles.listOptionLabel, assigneeId === null && styles.listOptionLabelActive]}>Unassigned</Text>
-            </Pressable>
-            {assigneeOptions.map((option) => {
-              const active = option.id === assigneeId;
-              return (
-                <Pressable
-                  key={option.id}
-                  onPress={() => handleSelectAssignee(option.id)}
-                  style={[styles.listOption, active && styles.listOptionActive]}
-                >
-                  <Text style={[styles.listOptionLabel, active && styles.listOptionLabelActive]}>
-                    {option.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        )}
+        <Pressable style={styles.dropdown} onPress={() => setAssigneePickerOpen(true)}>
+          <Text style={styles.dropdownValue}>{assigneeLabel}</Text>
+          <Ionicons name={assigneePickerOpen ? "chevron-up" : "chevron-down"} size={16} color={colors.textSecondary} />
+        </Pressable>
         <Text style={styles.helperText}>
           Assigned to: {assigneeLabel}. Only one assignee at a time; scheduled tasks show up only for that person.
         </Text>
+        {membersLoading ? <Text style={styles.helperText}>Loading members…</Text> : null}
+        <Modal visible={assigneePickerOpen} transparent animationType="fade" onRequestClose={() => setAssigneePickerOpen(false)}>
+          <Pressable style={styles.dropdownBackdrop} onPress={() => setAssigneePickerOpen(false)}>
+            <Pressable style={styles.dropdownCard} onPress={(e) => e.stopPropagation()}>
+              <Text style={styles.dropdownTitle}>Select assignee</Text>
+              <ScrollView style={{ maxHeight: 320 }} contentContainerStyle={{ gap: 8 }}>
+                <Pressable
+                  onPress={() => {
+                    handleSelectAssignee(null);
+                    setAssigneePickerOpen(false);
+                  }}
+                  style={[styles.dropdownOption, assigneeId === null && styles.dropdownOptionActive]}
+                >
+                  <Text style={[styles.dropdownOptionText, assigneeId === null && styles.dropdownOptionTextActive]}>Unassigned</Text>
+                </Pressable>
+                {combinedAssigneeOptions.map((option) => {
+                  const active = option.id === assigneeId;
+                  return (
+                    <Pressable
+                      key={option.id}
+                      onPress={() => {
+                        handleSelectAssignee(option.id);
+                        setAssigneePickerOpen(false);
+                      }}
+                      style={[styles.dropdownOption, active && styles.dropdownOptionActive]}
+                    >
+                      <Text style={[styles.dropdownOptionText, active && styles.dropdownOptionTextActive]}>{option.label}</Text>
+                      <Text style={styles.dropdownOptionMeta}>{option.role === "owner" ? "Owner" : "Collaborator"}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </Pressable>
+          </Pressable>
+        </Modal>
       </Section>
 
       <Section
@@ -1635,6 +1673,66 @@ function createStyles(colors: ThemeColors) {
     },
     weekdayTextActive: {
       color: colors.primaryText,
+    },
+    dropdown: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      backgroundColor: colors.inputBackground,
+    },
+    dropdownValue: {
+      color: colors.text,
+      fontWeight: "600",
+      fontSize: 16,
+    },
+    dropdownBackdrop: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.35)",
+      justifyContent: "center",
+      alignItems: "center",
+      padding: 20,
+    },
+    dropdownCard: {
+      width: "100%",
+      maxWidth: 420,
+      backgroundColor: colors.surface,
+      borderRadius: 14,
+      padding: 16,
+      gap: 12,
+    },
+    dropdownTitle: {
+      fontSize: 16,
+      fontWeight: "700",
+      color: colors.text,
+    },
+    dropdownOption: {
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.inputBackground,
+    },
+    dropdownOptionActive: {
+      borderColor: colors.accent,
+      backgroundColor: colors.accentMuted,
+    },
+    dropdownOptionText: {
+      color: colors.text,
+      fontWeight: "500",
+    },
+    dropdownOptionTextActive: {
+      color: colors.accentText,
+    },
+    dropdownOptionMeta: {
+      color: colors.textSecondary,
+      fontSize: 12,
+      marginTop: 2,
     },
     pickerModalBackdrop: {
       flex: 1,

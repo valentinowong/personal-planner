@@ -14,15 +14,51 @@ type Props = {
   dataSet?: Record<string, string>;
   active?: boolean;
   showGrabHandle?: boolean;
+  showAssigneeChip?: boolean;
 };
 
-export function ListTaskItem({ task, onToggle, onPress, subtitle, dataSet, active = false, showGrabHandle = false }: Props) {
+export function ListTaskItem({
+  task,
+  onToggle,
+  onPress,
+  subtitle,
+  dataSet,
+  active = false,
+  showGrabHandle = false,
+  showAssigneeChip = false,
+}: Props) {
   const isDone = task.status === "done";
   const { colors, mode } = useTheme();
   const scheduleState = useMemo(() => getTaskScheduleState(task), [task.due_date, task.planned_end, task.planned_start]);
   const styles = useMemo(() => createStyles(colors, mode), [colors, mode]);
   const scheduleStyleKey =
     scheduleState === "unscheduled" ? "cardUnscheduled" : scheduleState === "dateOnly" ? "cardDateOnly" : "cardTimed";
+
+  const assigneeInitials = useMemo(() => {
+    if (!task.assignee_id) return null;
+    const source = task.assignee_display_name || task.assignee_email || "";
+    const parts = source
+      .replace(/[^A-Za-z0-9 ]/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (parts.length === 0 && task.assignee_email) {
+      const emailName = task.assignee_email.split("@")[0];
+      const emailPart = emailName.replace(/[^A-Za-z0-9]/g, "").slice(0, 2);
+      return emailPart.toUpperCase() || null;
+    }
+    const first = parts[0]?.[0] ?? "";
+    const last = parts.length > 1 ? parts[parts.length - 1][0] : parts[0]?.[1] ?? "";
+    const initials = `${first}${last}`.toUpperCase().slice(0, 2);
+    return initials || null;
+  }, [task.assignee_display_name, task.assignee_email, task.assignee_id]);
+
+  const assigneeLabel = useMemo(() => {
+    if (task.assignee_display_name) return task.assignee_display_name;
+    if (task.assignee_email) return task.assignee_email;
+    if (task.assignee_id) return "Assigned";
+    return "Unassigned";
+  }, [task.assignee_display_name, task.assignee_email, task.assignee_id]);
 
   return (
     <Pressable
@@ -33,9 +69,24 @@ export function ListTaskItem({ task, onToggle, onPress, subtitle, dataSet, activ
     >
       <Pressable onPress={() => onToggle(task)} style={[styles.checkbox, isDone && styles.checkboxDone]} />
       <View style={styles.content}>
-        <Text style={[styles.title, isDone && styles.titleDone]} numberOfLines={2}>
-          {task.title}
-        </Text>
+        <View style={styles.titleRow}>
+          <Text style={[styles.title, isDone && styles.titleDone]} numberOfLines={2}>
+            {task.title}
+          </Text>
+          {showAssigneeChip ? (
+            <View style={styles.assigneeChip} accessibilityLabel={`Assignee: ${assigneeLabel}`}>
+              {task.assignee_id ? (
+                assigneeInitials ? (
+                  <Text style={styles.assigneeText}>{assigneeInitials}</Text>
+                ) : (
+                  <Ionicons name="person" size={14} color={colors.textSecondary} />
+                )
+              ) : (
+                <Ionicons name="person-outline" size={14} color={colors.textSecondary} />
+              )}
+            </View>
+          ) : null}
+        </View>
         {subtitle ? (
           <Text style={styles.subtitle} numberOfLines={1}>
             {subtitle}
@@ -125,10 +176,16 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
     title: {
       fontWeight: "600",
       color: colors.text,
+      flex: 1,
     },
     titleDone: {
       textDecorationLine: "line-through",
       color: colors.textMuted,
+    },
+    titleRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
     },
     subtitle: {
       marginTop: 4,
@@ -140,6 +197,21 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       alignItems: "center",
       justifyContent: "center",
       opacity: 0.8,
+    },
+    assigneeChip: {
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceAlt,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    assigneeText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: colors.text,
     },
   });
 }

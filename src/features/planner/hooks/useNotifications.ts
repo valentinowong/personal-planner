@@ -18,6 +18,17 @@ export function useNotifications() {
     enabled: Boolean(userId),
   });
 
+  const filteredNotifications = (notificationsQuery.data ?? []).filter((item) => {
+    // Drop sender confirmation
+    if (item.kind === "share_invited_sent") return false;
+    // Drop self-triggered assignment changes when actor_id matches the recipient
+    if ((item.kind === "assignment_assigned" || item.kind === "assignment_unassigned") && userId) {
+      const actorId = (item.payload?.actor_id as string | undefined) ?? null;
+      if (actorId && actorId === userId) return false;
+    }
+    return true;
+  });
+
   const markReadMutation = useMutation({
     mutationFn: (id: string) => markNotificationRead(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications", userId] }),
@@ -31,10 +42,11 @@ export function useNotifications() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["notifications", userId] }),
   });
 
-  const unreadCount = (notificationsQuery.data ?? []).filter((item) => !item.read_at).length;
+  const unreadCount = filteredNotifications.filter((item) => !item.read_at).length;
 
   return {
     ...notificationsQuery,
+    data: filteredNotifications,
     unreadCount,
     markRead: markReadMutation.mutateAsync,
     markAllRead: markAllReadMutation.mutateAsync,

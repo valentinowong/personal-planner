@@ -1,49 +1,44 @@
-add Accept / Reject for share invites:
+Here’s what’s missing today and concrete improvements to preload assignee info so the UI never flickers or shows
+  “Assigned”/“Unassigned” placeholders.
 
-  1) Data & API
+  Problems observed
 
-  - Reuse existing table/columns (list_shares.status = pending/active/revoked).
-  - Use current API functions:
-      - acceptShare(shareId) (already exists).
-      - Add declineShare(shareId) that sets status='revoked' (or delete row).
-  - Ensure RLS allows the invitee (user_id) to update their own pending invites (policy already added; verify).
+  - get_tasks_window returns only assignee_id; no display/email, so the Task Detail must wait for list-member data.
+  - Members are loaded per-list (useListMembers(listId)) and only after opening the detail, so there’s a race on first open.
+  - The owner’s display name comes from auth metadata or a late profile fetch; collaborators’ display names rely on the
+    profiles join inside fetchListShares, so non-shared assignees (e.g., reassigned by someone else) still lack names.
+  - We don’t prefetch a global “assignee directory” for the current window of tasks.
 
-  2) Surface pending invites in UI
+  Improvements (minimal backend + frontend)
 
-  - Add a “Invites” tab/section to the Notifications modal (or a card at top):
-      - Fetch pending shares where status='pending' and user_id=auth.uid() (or email match if user_id null).
-      - Show list name, inviter (invited_by), timestamp, action buttons: Accept / Decline.
-  - Alternatively (or in addition), add an “Invites” block in List Settings → Sharing for pending invites assigned to
-    the current user.
+  1. Enrich the tasks window RPC:
+      - Add a join to profiles (and optionally auth.users email) in get_tasks_window, returning assignee_display_name and
+        assignee_email.
+      - Extend TaskWindowRow to include these fields and store them in the local cache (sanitizeTaskPayload / toWindowRow).
+      - This gives every task row its own assignee label without extra requests.
+  2. Prefetch assignee profiles for the visible window:
+      - Add a hook useAssigneeProfiles(start, end) that:
+          - Reads assignee_ids from the tasks query result.
+          - Fires a single profiles select with in (ids) (deduped) and caches by user_id.
+      - Use this map to render labels anywhere tasks are shown (cards, detail, backlog) as a fast fallback to RPC enrichment.
+  3. Broaden member fetching:
+      - Change useListMembers to accept an array of list ids (e.g., active lists in the window) and return a merged member
+        map. This preloads potential assignees once instead of per modal open.
+      - Keep the per-list role info, but expose a lookup by user_id so components can read names immediately.
+  4. Denormalize for offline/UI speed (optional but effective):
+      - Store assignee_display_name in the local tasks table (and sync it from the RPC). Update it optimistically on
+        assignment changes.
+      - On assignment changes, also update a small assignee_profiles cache keyed by user_id.
+  5. Guardrails / RLS:
+      - Ensure the profiles RLS allows select when user_id = auth.uid() OR the user shares a list with auth.uid(). Otherwise
+        the join in get_tasks_window will return nulls for shared collaborators.
 
-  3) Actions
+  Suggested implementation order
 
-  - Accept: call acceptShare(shareId); invalidate list-shares and notifications; toast “Added to list”.
-  - Decline: call declineShare(shareId); same invalidations; toast “Invite declined”.
-  - Disable buttons while mutating; show inline spinner per row.
+  1. RPC change + TaskWindowRow shape and cache plumbing.
+  2. useAssigneeProfiles hook and consume it in Task Detail + cards as fallback.
+  3. Expand useListMembers to multi-list prefetch and switch consumers to the shared map.
+  4. (Optional) denormalize display name into tasks for offline / zero-join rendering.
 
-  4) Notifications behavior
-
-  - When Accept: DB trigger already sends share_accepted to owner; also mark the invite notification read client-side.
-  - When Decline: fire share_revoked (reuse revoke trigger) so owner knows; mark invite notification read.
-  - Optional: auto-delete the invite notification on accept/decline.
-
-  5) Visibility rules
-
-  - Only show invites where:
-      - status='pending', and (user_id = auth.uid() OR invited_email = currentUserEmail).
-      - Hide Inbox/system lists as unshareable (but they shouldn’t be invitables anyway).
-  - If invite lacks user_id but email matches current user, allow accept (call acceptShare, which sets user_id).
-
-  6) Error handling
-
-  - On 403/404, show “Invite no longer valid.”
-  - If accept fails due to RLS, prompt to refresh.
-
-  7) Small UX polish
-
-  - In Notifications tab: badge “Invites” when pending > 0.
-  - Empty state: “No invites—ask to be added to a list.”
-
-  If you’re good with this, I’ll implement the decline API, add the pending-invites list to the Notifications modal with
-  Accept/Decline buttons, and wire the mutations + cache invalidation.
+  This will give you assignee names at the same time as tasks load, eliminate the modal flicker, and reduce redundant
+  queries. Let me know which steps you want me to implement now—I can start with the RPC enrichment and frontend wiring.

@@ -1,38 +1,36 @@
-create extension if not exists "uuid-ossp";
+-- Enrich get_tasks_window with assignee profile data and open profiles RLS
+-- so shared collaborators can surface display names/emails in the planner UI.
 
-create or replace function public.uuid_v5(namespace uuid, name text)
-returns uuid
-language sql
-immutable
-as $$
-  select uuid_generate_v5(namespace, name);
-$$;
+-- Drop existing signature so we can extend return columns safely.
+DROP FUNCTION IF EXISTS public.get_tasks_window(date, date);
 
-create or replace function public.get_tasks_window(_start date, _end date)
-returns table (
+CREATE FUNCTION public.get_tasks_window(_start date, _end date)
+ RETURNS TABLE(
   id uuid,
   user_id uuid,
   list_id uuid,
+  assignee_id uuid,
+  assignee_display_name text,
+  assignee_email text,
   title text,
   notes text,
-  status task_status,
+  status public.task_status,
   due_date date,
-  planned_start timestamptz,
-  planned_end timestamptz,
-  estimate_minutes int,
-  actual_minutes int,
-  priority int,
-  sort_index int,
+  planned_start timestamp with time zone,
+  planned_end timestamp with time zone,
+  estimate_minutes integer,
+  actual_minutes integer,
+  priority integer,
+  sort_index integer,
   is_recurring boolean,
   recurrence_id uuid,
   occurrence_date date,
   moved_to_date date
 )
-language sql
-security definer
-set search_path = public
-stable
-as $$
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
   with window_days as (
     select generate_series(_start, _end, interval '1 day')::date as day
   ),
@@ -40,16 +38,19 @@ as $$
     select
       uuid_v5(r.id, d.day::text) as id,
       r.user_id,
-      coalesce(occ.list_id, tpl.list_id, r.list_id) as list_id,
-      coalesce(occ.title, tpl.title, r.title) as title,
-      coalesce(occ.notes, tpl.notes, r.notes) as notes,
+      coalesce(occ.list_id, r.list_id) as list_id,
+      null::uuid as assignee_id,
+      null::text as assignee_display_name,
+      null::text as assignee_email,
+      coalesce(occ.title, r.title) as title,
+      coalesce(occ.notes, r.notes) as notes,
       coalesce(occ.status, 'todo') as status,
       coalesce(occ.moved_to_date, d.day) as due_date,
-      coalesce(occ.planned_start, tpl.planned_start) as planned_start,
-      coalesce(occ.planned_end, tpl.planned_end) as planned_end,
-      coalesce(tpl.estimate_minutes, r.estimate_minutes) as estimate_minutes,
+      coalesce(occ.planned_start, null) as planned_start,
+      coalesce(occ.planned_end, null) as planned_end,
+      r.estimate_minutes,
       coalesce(occ.actual_minutes, null) as actual_minutes,
-      coalesce(tpl.priority, r.priority) as priority,
+      r.priority,
       0 as sort_index,
       true as is_recurring,
       r.id as recurrence_id,
@@ -57,8 +58,6 @@ as $$
       occ.moved_to_date,
       occ.skip
     from public.recurrences r
-    left join public.tasks tpl
-      on tpl.id = r.template_task_id and tpl.user_id = auth.uid()
     join window_days d on d.day between _start and _end
     left join public.recurrence_occurrences occ
       on occ.recurrence_id = r.id and occ.occurrence_date = d.day
@@ -90,6 +89,9 @@ as $$
       t.id,
       t.user_id,
       t.list_id,
+      t.assignee_id,
+      p.display_name as assignee_display_name,
+      u.email as assignee_email,
       t.title,
       t.notes,
       t.status,
@@ -105,13 +107,13 @@ as $$
       null::date as occurrence_date,
       null::date as moved_to_date
     from public.tasks t
-    where t.user_id = auth.uid()
-      and t.due_date between _start and _end
-      and not exists (
-        select 1 from public.recurrences r
-        where r.template_task_id = t.id
-          and r.user_id = auth.uid()
-          and r.active
+    left join public.profiles p on p.user_id = t.assignee_id
+    left join auth.users u on u.id = t.assignee_id
+    where t.due_date between _start and _end
+      and (
+        t.user_id = auth.uid()
+        or t.assignee_id = auth.uid()
+        or (t.list_id is not null and list_shared_with_user(t.list_id, auth.uid()))
       )
 
     union all
@@ -120,6 +122,9 @@ as $$
       e.id,
       e.user_id,
       e.list_id,
+      e.assignee_id,
+      e.assignee_display_name,
+      e.assignee_email,
       e.title,
       e.notes,
       e.status,
@@ -137,4 +142,32 @@ as $$
     from expanded e
   ) combined
   order by due_date, sort_index, priority desc;
-$$;
+$function$
+;
+
+-- Allow users to read collaborator profiles when they share a list or task.
+create policy "profiles_select_shared_or_self"
+  on "public"."profiles"
+  as permissive
+  for select
+  to public
+  using (
+    auth.uid() = user_id
+    or exists (
+      select 1
+      from public.tasks t
+      where t.assignee_id = profiles.user_id
+        and (
+          t.user_id = auth.uid()
+          or t.assignee_id = auth.uid()
+          or (t.list_id is not null and list_shared_with_user(t.list_id, auth.uid()))
+        )
+    )
+    or exists (
+      select 1
+      from public.list_shares s
+      where s.user_id = profiles.user_id
+        and s.status = 'active'
+        and list_shared_with_user(s.list_id, auth.uid())
+    )
+  );

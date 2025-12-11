@@ -8,6 +8,8 @@ export type TaskWindowRow = {
   user_id: string;
   list_id: string | null;
   assignee_id?: string | null;
+  assignee_display_name?: string | null;
+  assignee_email?: string | null;
   title: string;
   notes: string | null;
   status: "todo" | "doing" | "done" | "canceled";

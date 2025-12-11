@@ -14,7 +14,11 @@ export function useLists() {
   const queryClient = useQueryClient();
   const { session } = useAuth();
   const userId = session?.user.id;
-  const listsQuery = useQuery({ queryKey: ["lists"], queryFn: fetchListsApi, enabled: Boolean(userId) });
+  const listsQuery = useQuery({
+    queryKey: ["lists"],
+    queryFn: () => fetchListsApi({ userId, email: session?.user.email }),
+    enabled: Boolean(userId),
+  });
   const bootstrappedRef = useRef(false);
 
   const ensureDefaults = useMutation({

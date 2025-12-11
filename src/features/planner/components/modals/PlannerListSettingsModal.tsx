@@ -38,7 +38,9 @@ export function PlannerListSettingsModal({
     return list.is_system || lowered === "inbox";
   }, [list]);
 
-  const { members, activeMembers, isLoading, revoke } = useListMembers(list?.id ?? null);
+  const { members, activeMembers, isLoading, error: membersError, refetch: refetchMembers } = useListMembers(
+    list?.id ?? null,
+  );
 
   useEffect(() => {
     setName(list?.name ?? "");
@@ -141,6 +143,16 @@ export function PlannerListSettingsModal({
                       <>
                         <View style={styles.settingsCard}>
                           <Text style={styles.settingsCardTitle}>Members</Text>
+                          {membersError ? (
+                            <View style={{ gap: 6 }}>
+                              <Text style={[styles.helperText, { color: colors.error }]}>
+                                Could not load members: {membersError.message ?? "Unknown error"}
+                              </Text>
+                              <Pressable style={styles.modalPrimaryButton} onPress={() => refetchMembers()}>
+                                <Text style={styles.modalPrimaryText}>Retry</Text>
+                              </Pressable>
+                            </View>
+                          ) : null}
                           {isLoading ? (
                             <Text style={styles.helperText}>Loading members…</Text>
                           ) : (members ?? []).length === 0 ? (

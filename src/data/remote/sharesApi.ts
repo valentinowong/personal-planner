@@ -15,16 +15,21 @@ export type ListShareRow = {
 
 export type ListShareWithMeta = ListShareRow & {
   list?: { id: string; name: string } | null;
+  profile?: { user_id: string; display_name: string | null } | null;
 };
 
-export async function fetchListShares(listId: string) {
+export async function fetchListShares(listIdOrIds: string | string[]) {
+  const listIds = Array.isArray(listIdOrIds) ? listIdOrIds : [listIdOrIds];
+  if (!listIds.length) return [];
   const { data, error } = await supabase
     .from("list_shares")
+    // Keep the select simple; joining profiles requires a declared FK relationship,
+    // and in some environments (e.g., during debugging) that relationship may be missing.
     .select("*")
-    .eq("list_id", listId)
+    .in("list_id", listIds)
     .order("created_at", { ascending: true });
   if (error) throw error;
-  return (data ?? []) as ListShareRow[];
+  return (data ?? []) as ListShareWithMeta[];
 }
 
 export async function inviteToListShare(payload: { listId: string; email: string; role?: "owner" | "collaborator" }) {

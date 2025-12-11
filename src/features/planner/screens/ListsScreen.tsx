@@ -6,12 +6,14 @@ import {
   ActivityIndicator,
   Alert,
   Platform,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from "react-native";
+import type { PostgrestError } from "@supabase/supabase-js";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { PlannerListHoverTarget } from "../components/drag/dropTargets";
 import { PlannerBacklogPanel } from "../components/PlannerBacklogPanel";
@@ -36,6 +38,7 @@ import { useTheme } from "../../../theme/ThemeContext";
 import type { RemoteList } from "../hooks/useLists";
 import { useLists } from "../hooks/useLists";
 import { useTasks } from "../hooks/useTasks";
+import { useListMembers } from "../hooks/useListMembers";
 import type { LocalTask } from "../../../data/local/db";
 import { queueTaskDeletion, queueTaskMutation } from "../../../data/sync";
 import { generateUUID } from "../../../domain/shared/uuid";
@@ -138,6 +141,8 @@ function rowToLocalTask(row: TaskWindowRow): LocalTask {
     user_id: row.user_id,
     list_id: row.list_id ?? null,
     assignee_id: row.assignee_id ?? null,
+    assignee_display_name: row.assignee_display_name ?? null,
+    assignee_email: row.assignee_email ?? null,
     title: row.title,
     notes: row.notes,
     status: row.status,
@@ -211,6 +216,10 @@ export default function ListsScreen() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newListName, setNewListName] = useState("");
   const [creatingList, setCreatingList] = useState(false);
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false);
+  const [duplicateDialogMessage, setDuplicateDialogMessage] = useState(
+    "You already have a list with that name. Please choose a different name.",
+  );
   const [viewMode, setViewMode] = useState<PlannerViewMode>("tasks");
   const [plannerOffset, setPlannerOffset] = useState(0);
   const plannerDays = useMemo(
@@ -295,6 +304,7 @@ export default function ListsScreen() {
   }, [activeList]);
   const inboxList = orderedLists[0];
   const backlogListIds = useMemo(() => orderedLists.map((list) => list.id), [orderedLists]);
+  const { memberByUserId: sharedMemberLookup } = useListMembers(backlogListIds);
   const backlogQuery = useQuery({
     queryKey: ["backlog", backlogListIds.join("|")],
     queryFn: () => fetchListBacklog(backlogListIds.length ? backlogListIds : undefined),
@@ -308,14 +318,20 @@ export default function ListsScreen() {
     });
     const fallbackListId = orderedLists[0]?.id ?? null;
     (backlogQuery.data ?? []).forEach((task) => {
-      if (task.assignee_id && task.assignee_id !== currentUserId) return;
       const targetListId = task.list_id ?? fallbackListId;
       if (!targetListId) return;
+      const member = task.assignee_id ? sharedMemberLookup[task.assignee_id] : undefined;
+      const displayName = member?.display_name ?? task.assignee_display_name ?? null;
+      const email = member?.email ?? task.assignee_email ?? null;
+      const enrichedTask =
+        displayName || email
+          ? { ...task, assignee_display_name: displayName ?? null, assignee_email: email }
+          : task;
       bucket[targetListId] = bucket[targetListId] ?? [];
-      bucket[targetListId].push(task);
+      bucket[targetListId].push(enrichedTask);
     });
     return bucket;
-  }, [orderedLists, backlogQuery.data, currentUserId]);
+  }, [orderedLists, backlogQuery.data, sharedMemberLookup]);
 
   const handleDropPendingIntoDay = useCallback(
     async (dayKey: string) => {
@@ -331,6 +347,8 @@ export default function ListsScreen() {
         updated_at: new Date().toISOString(),
       };
       pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      patchTasksCache(after);
+      patchTaskDetailCache(after);
       if ((before.assignee_id ?? null) !== (after.assignee_id ?? null)) {
         await logAssignmentHistory({
           taskId: after.id,
@@ -345,7 +363,7 @@ export default function ListsScreen() {
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       recordHistory({ action: "schedule_day", taskId: after.id, before, after });
     },
-    [pendingTask, queryClient, pushUndo, recordHistory],
+    [patchTaskDetailCache, patchTasksCache, pendingTask, queryClient, pushUndo, recordHistory],
   );
 
   const handleDropPendingIntoSlot = useCallback(
@@ -365,6 +383,8 @@ export default function ListsScreen() {
         updated_at: new Date().toISOString(),
       };
       pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      patchTasksCache(after);
+      patchTaskDetailCache(after);
       if ((before.assignee_id ?? null) !== (after.assignee_id ?? null)) {
         await logAssignmentHistory({
           taskId: after.id,
@@ -379,7 +399,7 @@ export default function ListsScreen() {
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
-    [pendingTask, queryClient, pushUndo, recordHistory],
+    [patchTaskDetailCache, patchTasksCache, pendingTask, queryClient, pushUndo, recordHistory],
   );
 
   const [showBacklog, setShowBacklog] = useState(true);
@@ -440,7 +460,7 @@ export default function ListsScreen() {
   const markInviteNotificationRead = useCallback(
     async (shareId: string) => {
       const related = (notifications.data ?? []).find(
-        (item) => (item.kind === "share_invited" || item.kind === "share_invited_sent") && (item.payload as any)?.share_id === shareId,
+        (item) => item.kind === "share_invited" && (item.payload as any)?.share_id === shareId,
       );
       if (related && !related.read_at) {
         try {
@@ -738,6 +758,15 @@ export default function ListsScreen() {
 
   async function handleCreateList(name: string) {
     if (!name.trim()) return;
+    const normalized = name.trim().toLowerCase();
+    const ownsListWithSameName = (lists ?? []).some(
+      (list) => list.user_id === currentUserId && (list.name ?? "").trim().toLowerCase() === normalized,
+    );
+    if (ownsListWithSameName) {
+      setDuplicateDialogMessage("You already have a list with that name. Please choose a different name.");
+      setDuplicateDialogOpen(true);
+      return;
+    }
     try {
       setCreatingList(true);
       await upsertList({
@@ -748,8 +777,19 @@ export default function ListsScreen() {
       });
       setCreateModalOpen(false);
       setNewListName("");
-    } catch {
-      Alert.alert("Unable to create list", "Please try again shortly.");
+    } catch (error) {
+      const pgError = error as PostgrestError;
+      const message = typeof pgError?.message === "string" ? pgError.message : null;
+      const isDuplicate =
+        (pgError?.code === "23505" && (message?.includes("lists_owner_name_unique") ?? true)) ||
+        (message?.toLowerCase().includes("duplicate key value") ?? false);
+
+      if (isDuplicate) {
+        setDuplicateDialogMessage("You already have a list with that name. Please choose a different name.");
+        setDuplicateDialogOpen(true);
+      } else {
+        Alert.alert("Unable to create list", message ?? "Please try again shortly.");
+      }
     } finally {
       setCreatingList(false);
     }
@@ -825,21 +865,33 @@ export default function ListsScreen() {
   const handleAssignBacklogTaskToDay = useCallback(
     async (task: LocalTask, dayKey: string) => {
       const before = cloneTask(task);
+      const nextAssignee = task.assignee_id ?? currentUserId;
       const after = {
         ...task,
         list_id: task.list_id ?? null,
         due_date: dayKey,
         planned_start: null,
         planned_end: null,
+        assignee_id: nextAssignee,
         updated_at: new Date().toISOString(),
       };
       pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      patchTasksCache(after);
+      patchTaskDetailCache(after);
+      if ((before.assignee_id ?? null) !== (after.assignee_id ?? null)) {
+        await logAssignmentHistory({
+          taskId: task.id,
+          previousAssigneeId: before.assignee_id ?? null,
+          newAssigneeId: after.assignee_id ?? null,
+          note: "Auto-assigned when scheduling",
+        });
+      }
       await queueTaskMutation(after);
       recordHistory({ action: "schedule_day", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
-    [queryClient, pushUndo, recordHistory],
+    [currentUserId, patchTaskDetailCache, patchTasksCache, queryClient, pushUndo, recordHistory],
   );
 
   const handleAssignBacklogTaskToSlot = useCallback(
@@ -848,22 +900,34 @@ export default function ListsScreen() {
       const end = new Date(start);
       end.setHours(end.getHours() + 1);
       const before = cloneTask(task);
+      const nextAssignee = task.assignee_id ?? currentUserId;
       const after = {
         ...task,
         list_id: task.list_id ?? null,
         due_date: dayKey,
         planned_start: start.toISOString(),
         planned_end: end.toISOString(),
+        assignee_id: nextAssignee,
         updated_at: new Date().toISOString(),
       };
       pushUndo({ kind: "update", before, after, label: "Scheduled task" });
+      patchTasksCache(after);
+      patchTaskDetailCache(after);
+      if ((before.assignee_id ?? null) !== (after.assignee_id ?? null)) {
+        await logAssignmentHistory({
+          taskId: task.id,
+          previousAssigneeId: before.assignee_id ?? null,
+          newAssigneeId: after.assignee_id ?? null,
+          note: "Auto-assigned when scheduling",
+        });
+      }
       await queueTaskMutation(after);
       recordHistory({ action: "schedule_slot", taskId: task.id, before, after });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
       queryClient.invalidateQueries({ queryKey: ["tasks"] });
       queryClient.invalidateQueries({ queryKey: ["task", task.id] });
     },
-    [queryClient, pushUndo, recordHistory],
+    [currentUserId, patchTaskDetailCache, patchTasksCache, queryClient, pushUndo, recordHistory],
   );
 
   async function handleAddScheduledTask(dayKey: string, title: string) {
@@ -874,6 +938,7 @@ export default function ListsScreen() {
       title: title.trim(),
       status: "todo",
       due_date: dayKey,
+      assignee_id: currentUserId,
     };
     pushUndo({ kind: "add", after: newTask, label: "Added task" });
     await queueTaskMutation(newTask);
@@ -1352,6 +1417,24 @@ export default function ListsScreen() {
         onAcceptInvite={handleAcceptInvite}
         onDeclineInvite={handleDeclineInvite}
       />
+      <Modal
+        visible={duplicateDialogOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setDuplicateDialogOpen(false)}
+      >
+        <Pressable style={styles.dialogBackdrop} onPress={() => setDuplicateDialogOpen(false)}>
+          <Pressable style={styles.dialogCard} onPress={(event) => event.stopPropagation()}>
+            <Text style={styles.dialogTitle}>List already exists</Text>
+            <Text style={styles.dialogMessage}>{duplicateDialogMessage}</Text>
+            <View style={styles.dialogActions}>
+              <Pressable style={styles.dialogButton} onPress={() => setDuplicateDialogOpen(false)}>
+                <Text style={styles.dialogButtonText}>Got it</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
       <PlannerListSettingsModal
         visible={Boolean(listSettingsTarget)}
         list={listSettingsTarget}
@@ -2804,6 +2887,50 @@ function createStyles(colors: ThemeColors) {
   toastText: {
     color: colors.text,
     fontWeight: "700",
+  },
+  dialogBackdrop: {
+    flex: 1,
+    backgroundColor: withAlpha(colors.text, 0.35),
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  dialogCard: {
+    width: 420,
+    maxWidth: "100%",
+    borderRadius: 16,
+    padding: 20,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    ...nativeShadow(colors.text, 0.08, 10, 6),
+    ...webShadow("0 12px 35px rgba(0,0,0,0.22)"),
+  },
+  dialogTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: colors.text,
+    marginBottom: 8,
+  },
+  dialogMessage: {
+    fontSize: 15,
+    color: colors.textSecondary,
+    marginBottom: 16,
+  },
+  dialogActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+  },
+  dialogButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: colors.primary,
+  },
+  dialogButtonText: {
+    color: colors.primaryText,
+    fontWeight: "600",
+    fontSize: 15,
   },
   });
 }

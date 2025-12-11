@@ -1,10 +1,10 @@
+import { Ionicons } from "@expo/vector-icons";
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
 import type { LocalTask } from "../../data/local/db";
-import { useTheme } from "../../theme/ThemeContext";
-import type { ThemeColors, ThemeMode } from "../../theme";
 import { getTaskScheduleState } from "../../domain/tasks/schedule";
+import type { ThemeColors, ThemeMode } from "../../theme";
+import { useTheme } from "../../theme/ThemeContext";
 
 type Props = {
   task: LocalTask;
@@ -13,15 +13,54 @@ type Props = {
   detailText?: string | null;
   badgeText?: string | null;
   showGrabHandle?: boolean;
+  showAssigneeChip?: boolean;
 };
 
-export function TaskCard({ task, onToggleStatus, onPress, detailText, badgeText, showGrabHandle = false }: Props) {
+export function TaskCard({
+  task,
+  onToggleStatus,
+  onPress,
+  detailText,
+  badgeText,
+  showGrabHandle = false,
+  showAssigneeChip = false,
+}: Props) {
   const isDone = task.status === "done";
   const { colors, mode } = useTheme();
-  const scheduleState = useMemo(() => getTaskScheduleState(task), [task.due_date, task.planned_end, task.planned_start]);
+  const scheduleState = useMemo(
+    () => getTaskScheduleState(task),
+    [task.due_date, task.planned_end, task.planned_start],
+  );
   const styles = useMemo(() => createStyles(colors, mode), [colors, mode]);
   const scheduleStyleKey =
     scheduleState === "unscheduled" ? "cardUnscheduled" : scheduleState === "dateOnly" ? "cardDateOnly" : "cardTimed";
+
+  const assigneeInitials = useMemo(() => {
+    if (!task.assignee_id) return null;
+    const source = task.assignee_display_name || task.assignee_email || "";
+    const parts = source
+      .replace(/[^A-Za-z0-9 ]/g, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (parts.length === 0 && task.assignee_email) {
+      const emailName = task.assignee_email.split("@")[0];
+      const emailPart = emailName.replace(/[^A-Za-z0-9]/g, "").slice(0, 2);
+      return emailPart.toUpperCase() || null;
+    }
+    const first = parts[0]?.[0] ?? "";
+    const last = parts.length > 1 ? parts[parts.length - 1][0] : parts[0]?.[1] ?? "";
+    const initials = `${first}${last}`.toUpperCase().slice(0, 2);
+    return initials || null;
+  }, [task.assignee_display_name, task.assignee_email, task.assignee_id]);
+
+  const assigneeLabel = useMemo(() => {
+    if (task.assignee_display_name) return task.assignee_display_name;
+    if (task.assignee_email) return task.assignee_email;
+    if (task.assignee_id) return "Assigned";
+    return "Unassigned";
+  }, [task.assignee_display_name, task.assignee_email, task.assignee_id]);
+  const hasPlannedTime = Boolean(task.planned_start || task.planned_end);
 
   return (
     <Pressable
@@ -38,13 +77,41 @@ export function TaskCard({ task, onToggleStatus, onPress, detailText, badgeText,
             <Text style={[styles.title, isDone && styles.titleDone]} numberOfLines={2}>
               {task.title}
             </Text>
+            {!hasPlannedTime && showAssigneeChip ? (
+              <View style={styles.assigneeChip} accessibilityLabel={`Assignee: ${assigneeLabel}`}>
+                {task.assignee_id ? (
+                  assigneeInitials ? (
+                    <Text style={styles.assigneeText}>{assigneeInitials}</Text>
+                  ) : (
+                    <Ionicons name="person" size={14} color={colors.textSecondary} />
+                  )
+                ) : (
+                  <Ionicons name="person-outline" size={14} color={colors.textSecondary} />
+                )}
+              </View>
+            ) : null}
+          </View>
+          <View style={styles.metaRow}>
+            {detailText ? <Text style={styles.detail}>{detailText}</Text> : <View style={styles.detailPlaceholder} />}
             {badgeText ? (
               <View style={styles.badge}>
                 <Text style={styles.badgeText}>{badgeText}</Text>
               </View>
             ) : null}
+            {hasPlannedTime && showAssigneeChip ? (
+              <View style={styles.assigneeChip} accessibilityLabel={`Assignee: ${assigneeLabel}`}>
+                {task.assignee_id ? (
+                  assigneeInitials ? (
+                    <Text style={styles.assigneeText}>{assigneeInitials}</Text>
+                  ) : (
+                    <Ionicons name="person" size={14} color={colors.textSecondary} />
+                  )
+                ) : (
+                  <Ionicons name="person-outline" size={14} color={colors.textSecondary} />
+                )}
+              </View>
+            ) : null}
           </View>
-          {detailText ? <Text style={styles.detail}>{detailText}</Text> : null}
           {task.notes ? (
             <Text style={styles.notes} numberOfLines={2}>
               {task.notes}
@@ -121,10 +188,20 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       textDecorationLine: "line-through",
       color: colors.textMuted,
     },
+    metaRow: {
+      marginTop: 4,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+    },
     detail: {
       fontSize: 13,
       color: colors.textSecondary,
-      marginTop: 2,
+      flexShrink: 1,
+    },
+    detailPlaceholder: {
+      flex: 1,
     },
     notes: {
       fontSize: 13,
@@ -138,12 +215,28 @@ function createStyles(colors: ThemeColors, mode: ThemeMode) {
       backgroundColor: colors.surfaceAlt,
       borderWidth: 1,
       borderColor: colors.border,
-      alignSelf: "flex-start",
+      alignSelf: "flex-end",
     },
     badgeText: {
       fontSize: 12,
       fontWeight: "600",
       color: colors.textSecondary,
+    },
+    assigneeChip: {
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceAlt,
+      alignItems: "center",
+      justifyContent: "center",
+      marginLeft: 6,
+    },
+    assigneeText: {
+      fontSize: 12,
+      fontWeight: "700",
+      color: colors.text,
     },
   });
 }
