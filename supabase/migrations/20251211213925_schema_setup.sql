@@ -187,8 +187,9 @@ CREATE UNIQUE INDEX list_shares_pkey ON public.list_shares USING btree (id);
 
 CREATE UNIQUE INDEX list_shares_unique_member ON public.list_shares USING btree (list_id, user_id) WHERE (status <> 'revoked'::text);
 
-CREATE UNIQUE INDEX lists_pkey ON public.lists USING btree (id);
 CREATE UNIQUE INDEX lists_owner_name_unique ON public.lists USING btree (user_id, lower(name));
+
+CREATE UNIQUE INDEX lists_pkey ON public.lists USING btree (id);
 
 CREATE UNIQUE INDEX notifications_pkey ON public.notifications USING btree (id);
 
@@ -350,7 +351,7 @@ $function$
 ;
 
 CREATE OR REPLACE FUNCTION public.get_tasks_window(_start date, _end date)
- RETURNS TABLE(id uuid, user_id uuid, list_id uuid, assignee_id uuid, title text, notes text, status public.task_status, due_date date, planned_start timestamp with time zone, planned_end timestamp with time zone, estimate_minutes integer, actual_minutes integer, priority integer, sort_index integer, is_recurring boolean, recurrence_id uuid, occurrence_date date, moved_to_date date)
+ RETURNS TABLE(id uuid, user_id uuid, list_id uuid, assignee_id uuid, assignee_display_name text, assignee_email text, title text, notes text, status public.task_status, due_date date, planned_start timestamp with time zone, planned_end timestamp with time zone, estimate_minutes integer, actual_minutes integer, priority integer, sort_index integer, is_recurring boolean, recurrence_id uuid, occurrence_date date, moved_to_date date)
  LANGUAGE sql
  STABLE SECURITY DEFINER
  SET search_path TO 'public'
@@ -364,6 +365,8 @@ AS $function$
       r.user_id,
       coalesce(occ.list_id, r.list_id) as list_id,
       null::uuid as assignee_id,
+      null::text as assignee_display_name,
+      null::text as assignee_email,
       coalesce(occ.title, r.title) as title,
       coalesce(occ.notes, r.notes) as notes,
       coalesce(occ.status, 'todo') as status,
@@ -412,6 +415,8 @@ AS $function$
       t.user_id,
       t.list_id,
       t.assignee_id,
+      p.display_name as assignee_display_name,
+      u.email as assignee_email,
       t.title,
       t.notes,
       t.status,
@@ -427,6 +432,8 @@ AS $function$
       null::date as occurrence_date,
       null::date as moved_to_date
     from public.tasks t
+    left join public.profiles p on p.user_id = t.assignee_id
+    left join auth.users u on u.id = t.assignee_id
     where t.due_date between _start and _end
       and (
         t.user_id = auth.uid()
@@ -441,6 +448,8 @@ AS $function$
       e.user_id,
       e.list_id,
       e.assignee_id,
+      e.assignee_display_name,
+      e.assignee_email,
       e.title,
       e.notes,
       e.status,
@@ -1147,6 +1156,15 @@ grant truncate on table "public"."tasks" to "service_role";
 grant update on table "public"."tasks" to "service_role";
 
 
+  create policy "assignment_history_insert"
+  on "public"."assignment_history"
+  as permissive
+  for insert
+  to public
+with check ((changed_by = auth.uid()));
+
+
+
   create policy "assignment_history_select"
   on "public"."assignment_history"
   as permissive
@@ -1155,13 +1173,6 @@ grant update on table "public"."tasks" to "service_role";
 using ((EXISTS ( SELECT 1
    FROM public.tasks t
   WHERE ((t.id = assignment_history.task_id) AND ((t.user_id = auth.uid()) OR (t.assignee_id = auth.uid()))))));
-
-  create policy "assignment_history_insert"
-  on "public"."assignment_history"
-  as permissive
-  for insert
-  to public
-with check ((changed_by = auth.uid()));
 
 
 
@@ -1275,6 +1286,19 @@ using ((user_id = auth.uid()));
   to public
 using ((auth.uid() = user_id))
 with check ((auth.uid() = user_id));
+
+
+
+  create policy "profiles_select_shared_or_self"
+  on "public"."profiles"
+  as permissive
+  for select
+  to public
+using (((auth.uid() = user_id) OR (EXISTS ( SELECT 1
+   FROM public.tasks t
+  WHERE ((t.assignee_id = profiles.user_id) AND ((t.user_id = auth.uid()) OR (t.assignee_id = auth.uid()) OR ((t.list_id IS NOT NULL) AND public.list_shared_with_user(t.list_id, auth.uid())))))) OR (EXISTS ( SELECT 1
+   FROM public.list_shares s
+  WHERE ((s.user_id = profiles.user_id) AND (s.status = 'active'::text) AND public.list_shared_with_user(s.list_id, auth.uid()))))));
 
 
 
@@ -1404,3 +1428,5 @@ CREATE TRIGGER trg_notify_share_revoked AFTER UPDATE ON public.list_shares FOR E
 CREATE TRIGGER prune_task_history_trigger AFTER INSERT ON public.task_history FOR EACH ROW EXECUTE FUNCTION public.prune_task_history();
 
 CREATE TRIGGER trg_notify_task_assignee_change AFTER UPDATE ON public.tasks FOR EACH ROW EXECUTE FUNCTION public.notify_task_assignee_change();
+
+
