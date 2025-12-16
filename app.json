@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "wonton-planner",
-    "slug": "wonton-planner",
+    "name": "personal-planner",
+    "slug": "personal-planner",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "wontonplanner",
+    "scheme": "personalplanner",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
@@ -44,6 +44,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "1440d456-5dbc-4408-bec3-7f00204dfbeb"
+      }
+    },
+    "owner": "valentino.wong"
   }
 }
