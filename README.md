@@ -1,8 +1,22 @@
-# Welcome to your Expo app 👋
+# Personal Planner (Expo + Supabase)
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Cross‑platform personal planning app built with Expo Router, React Native, and Supabase. It supports collaborative task lists, weekly/day scheduling, recurring tasks, and real‑time sync between devices.
 
-## Get started
+## What’s inside
+
+- Expo/React Native app with file‑based routing (see `app/`)
+- Supabase backend for auth, storage, and real‑time data (see `supabase/migrations`)
+- State/query layer powered by TanStack Query + MMKV offline cache
+- Theming, reusable planner UI, and auth flows in `src/`
+
+## Prerequisites
+
+- Node.js 20+ and npm
+- Expo CLI (installed automatically via `npx expo …`)
+- Supabase project (cloud or local). Supabase CLI if you want to run the DB locally.
+- Platform tooling for the target you want to run (Android Studio, Xcode, or a device with Expo Go).
+
+## Quick start (fresh clone)
 
 1. Install dependencies
 
@@ -10,41 +24,54 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
    npm install
    ```
 
-2. Start the app
+2. Configure environment variables (see next section) so Expo can reach your Supabase project.
+
+3. Run the app
 
    ```bash
-   npx expo start
+   npm start           # or: npm run android / npm run ios / npm run web
    ```
 
-In the output, you'll find options to open the app in a
+   Use the Expo Dev Tools prompt/QR code to open the app in a simulator, device, or web browser.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+## Environment variables
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+The app reads Supabase credentials from `.env` files using Expo’s `EXPO_PUBLIC_` convention. Create one of the following files at the repo root (git‑ignored) with your own values:
 
 ```bash
-npm run reset-project
+# .env.local – default for local development
+EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+EXPO_PUBLIC_SUPABASE_ANON_KEY=your-public-anon-key
+
+# .env.production – values for a published build
+# EXPO_PUBLIC_SUPABASE_URL=...
+# EXPO_PUBLIC_SUPABASE_ANON_KEY=...
+
+# .env.machine – optional machine-specific override when tethering to a LAN Supabase instance
+# EXPO_PUBLIC_SUPABASE_URL=http://192.168.x.x:54321
+# EXPO_PUBLIC_SUPABASE_ANON_KEY=...
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Notes:
+- Keep these files out of version control (already covered by `.gitignore`).
+- The keys must be prefixed with `EXPO_PUBLIC_` so they are available at runtime in the client bundle.
 
-## Learn more
+## Running Supabase locally (optional)
 
-To learn more about developing your project with Expo, look at the following resources:
+If you want to mirror production locally:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+brew install supabase/tap/supabase   # or see Supabase docs
+supabase start                           # launches local Postgres + API
+supabase migration up                    # applies migrations in supabase/migrations
+```
 
-## Join the community
+Update `.env.machine` to point at the local API URL printed by `supabase start`.
 
-Join our community of developers creating universal apps.
+## Project tips
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+- Main entry is `app/_layout.tsx`; planner UI lives in `src/features/planner`.
+- Auth screens are in `app/(auth)/` and `src/features/auth`.
+- If the bundler gets stuck, clear caches with `expo start -c`.
+
+Happy planning!
